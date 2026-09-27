@@ -96,6 +96,7 @@ impl SimpleComponent for QuickSettingsMenu {
     view! {
         #[root]
         gtk::MenuButton {
+            add_css_class: "flat",
             set_direction: gtk::ArrowType::Down,
 
             #[wrap(Some)]

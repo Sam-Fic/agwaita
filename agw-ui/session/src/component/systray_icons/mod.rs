@@ -546,6 +546,7 @@ impl SystemTrayIcons {
         // Add a MenuButton for each system tray item
         for item in &self.items {
             let menu_button = gtk::MenuButton::new();
+            menu_button.add_css_class("flat");
 
             // Set icon from pixbuf or icon name
             if let Some(ref icon_name) = item.icon_name {

@@ -145,7 +145,12 @@ impl SimpleComponent for Workspaces {
                     }
 
                     for workspace in &self.workspaces {
-                        let button = gtk::Button::builder().label(&workspace.name).build();
+                        let button = gtk::Button::builder()
+                            .label(&workspace.name)
+                            .css_classes(["flat"])
+                            .valign(gtk::Align::Center)
+                            .height_request(26)
+                            .build();
 
                         if let Some(css) = Self::resolve_workspace_classes(workspace) {
                             button.inline_css(css.as_str());
@@ -173,7 +178,17 @@ impl SimpleComponent for Workspaces {
 
 impl Workspaces {
     fn resolve_workspace_classes(workspace: &WorkspaceInfo) -> Option<String> {
-        let mut css = "padding: 0 10px;".to_string();
+        // Round indicator: fixed square + fully rounded corners; state colors
+        // below still override the flat-button background.
+        let mut css = "
+            |min-width: 26px;
+            |min-height: 26px;
+            |padding: 0;
+            |border-radius: 9999px;
+            "
+        .trim_margin()
+        .as_str()
+        .to_string();
 
         if workspace.is_urgent {
             css.push_str(

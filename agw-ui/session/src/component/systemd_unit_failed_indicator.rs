@@ -36,6 +36,7 @@ impl SimpleComponent for SystemdUnitFailedIndicator {
     view! {
         #[root]
         gtk::Button {
+            add_css_class: "flat",
             #[watch]
             set_tooltip_markup: Some(&model.units_to_tooltip_markup()),
             #[watch]

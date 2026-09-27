@@ -57,6 +57,7 @@ impl SimpleComponent for InfoCenter {
     view! {
         #[root]
         gtk::MenuButton {
+            add_css_class: "flat",
             #[watch]
             set_label: &model.current_time,
 
@@ -167,7 +168,7 @@ impl InfoCenter {
         let now = Local::now();
         let locale = Self::get_system_locale();
         let formatted = now
-            .format_localized("%a %d %b %Y %H:%M:%S", locale)
+            .format_localized("%a %d %b %Y %H:%M", locale)
             .to_string();
 
         // Capitalize first character
