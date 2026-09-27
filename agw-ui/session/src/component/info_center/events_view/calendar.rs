@@ -31,12 +31,12 @@ use std::{
 };
 
 pub struct Calendar {
-    day_week: String,
-    date: String,
-    selected_date: String,
+    /// 选中日期的标题:相对今天的说法(Today/Yesterday/Tomorrow)或 "星期几 日 月"
+    selected_title: String,
     selected_naive_date: Option<NaiveDate>,
     is_selected_today: bool,
-    today_events: FactoryVecDeque<EventItem>,
+    /// 选中日期是否有日程,决定空状态占位是否显示
+    has_selected_events: bool,
     selected_day_events: FactoryVecDeque<EventItem>,
     locale: Locale,
     global_service: Arc<GlobalSystemService>,
@@ -80,26 +80,15 @@ impl SimpleComponent for Calendar {
             set_spacing: 10,
             // popover > contents 已有 12px padding,这里不再叠加,保证同心圆角链
 
-            // ===== 表头:今天 =====
-            gtk::Box {
-                set_orientation: gtk::Orientation::Vertical,
-                set_spacing: 2,
+            // ===== 表头:选中日期(相对今天) =====
+            gtk::Label {
+                add_css_class: "title-5",
+                inline_css: "
+                |font-weight: bold;
+                ".trim_margin().as_str(),
 
-                gtk::Label {
-                    add_css_class: "title-5",
-                    inline_css: "
-                    |font-weight: bold;
-                    ".trim_margin().as_str(),
-
-                    #[watch]
-                    set_label: &model.day_week,
-                },
-                gtk::Label {
-                    add_css_class: "title-4",
-
-                    #[watch]
-                    set_label: &model.date,
-                },
+                #[watch]
+                set_label: &model.selected_title,
             },
 
             // ===== 月/年导航 =====
@@ -186,7 +175,7 @@ impl SimpleComponent for Calendar {
                 set_margin_top: 4,
             },
 
-            // ===== 日程列表 =====
+            // ===== 日程列表(选中日期) =====
             gtk::ScrolledWindow {
                 set_propagate_natural_width: true,
                 set_propagate_natural_height: true,
@@ -194,65 +183,32 @@ impl SimpleComponent for Calendar {
                 set_vexpand: true,
                 set_width_request: 320 - 24,
                 set_max_content_height: 320,
-                // 与上方日历网格左右缘对齐:网格 7*38px + 6*2px 间距 = 278px,
-                // 在 296px 内容宽里居中后两侧各剩 9px
-                set_margin_start: 9,
-                set_margin_end: 9,
-                set_margin_top: 8,
+                // 与上方日历数字字形对齐(数字在 38px 格内居中,字形起点约在
+                // 格缘右 20px 处),左右 20px、上方 12px 留出呼吸感
+                set_margin_start: 20,
+                set_margin_end: 20,
+                set_margin_top: 12,
 
                 gtk::Box {
                     set_orientation: gtk::Orientation::Vertical,
 
-                    // Today events
-                    gtk::Box {
-                        set_orientation: gtk::Orientation::Vertical,
-                        set_spacing: 8,
-
-                        gtk::Label {
-                            add_css_class: "title-5",
-                            inline_css: "
-                            |font-weight: bold;
-                            ".trim_margin().as_str(),
-                            set_halign: gtk::Align::Start,
-
-                            set_label: "Today",
-                        },
-                        #[local_ref]
-                        today_events_box -> gtk::Box {
-                            set_orientation: gtk::Orientation::Vertical,
-                            set_spacing: 8,
-                        },
-                    },
-                    gtk::Box {
-                        set_margin_top: 8,
-                    },
-                    // Selected day events
-                    gtk::Box {
-                        set_orientation: gtk::Orientation::Vertical,
-                        set_spacing: 8,
+                    // 空状态占位
+                    gtk::Label {
+                        add_css_class: "dim-label",
+                        set_label: "No events",
+                        set_halign: gtk::Align::Center,
+                        set_margin_top: 24,
 
                         #[watch]
-                        set_visible: !model.is_selected_today,
-
-                        gtk::Label {
-                            add_css_class: "title-5",
-                            inline_css: "
-                            |font-weight: bold;
-                            ".trim_margin().as_str(),
-                            set_halign: gtk::Align::Start,
-
-                            #[watch]
-                            set_label: &model.selected_date,
-                        },
-                        #[local_ref]
-                        selected_events_box -> gtk::Box {
-                            set_orientation: gtk::Orientation::Vertical,
-                            set_width_request: 320 - 24,
-                            set_can_focus: false,
-                            set_focusable: false,
-                            set_spacing: 8,
-                        },
-
+                        set_visible: !model.has_selected_events,
+                    },
+                    #[local_ref]
+                    selected_events_box -> gtk::Box {
+                        set_orientation: gtk::Orientation::Vertical,
+                        set_width_request: 320 - 24,
+                        set_can_focus: false,
+                        set_focusable: false,
+                        set_spacing: 8,
                     },
                 },
             },
@@ -262,10 +218,6 @@ impl SimpleComponent for Calendar {
     fn init(global_service: Self::Init, root: Self::Root, sender: ComponentSender<Self>) -> ComponentParts<Self> {
         let now = Local::now();
 
-        let today_events = FactoryVecDeque::builder()
-            .launch(gtk::Box::default())
-            .detach();
-
         let selected_day_events = FactoryVecDeque::builder()
             .launch(gtk::Box::default())
             .detach();
@@ -273,12 +225,10 @@ impl SimpleComponent for Calendar {
         let locale = Self::get_system_locale();
 
         let model = Calendar {
-            day_week: Self::capitalize_first(now.format_localized("%A", locale).to_string()),
-            date: Self::capitalize_first(now.format_localized("%d %B %Y", locale).to_string()),
-            selected_date: Self::capitalize_first(now.format_localized("%d %B %Y", locale).to_string()),
+            selected_title: "Today".to_string(),
             selected_naive_date: Some(now.date_naive()),
             is_selected_today: true,
-            today_events,
+            has_selected_events: false,
             selected_day_events,
             locale,
             global_service,
@@ -292,7 +242,6 @@ impl SimpleComponent for Calendar {
             _day_handler: None,
         };
 
-        let today_events_box = model.today_events.widget();
         let selected_events_box = model.selected_day_events.widget();
 
         let widgets = view_output!();
@@ -340,10 +289,7 @@ impl SimpleComponent for Calendar {
         match message {
             CalendarInput::DaySelected(date) => {
                 self.selected_naive_date = Some(date);
-                self.selected_date = Self::capitalize_first(
-                    date.format_localized("%A %d %B %Y", self.locale).to_string(),
-                );
-
+                self.selected_title = Self::relative_title(date, self.locale);
                 let today = Local::now().date_naive();
                 self.is_selected_today = date == today;
 
@@ -370,7 +316,6 @@ impl SimpleComponent for Calendar {
                 self.redraw_days();
             },
             CalendarInput::UpdateEvents(_events) => {
-                self.update_today_events_from_service();
                 self.update_selected_day_events();
                 self.refresh_marks();
                 self.redraw_days();
@@ -379,13 +324,10 @@ impl SimpleComponent for Calendar {
                 let today = Local::now();
                 self.display_year = today.year();
                 self.display_month = today.month();
-                self.day_week = Self::capitalize_first(today.format_localized("%A", self.locale).to_string());
-                self.date = Self::capitalize_first(today.format_localized("%d %B %Y", self.locale).to_string());
-                self.selected_date = Self::capitalize_first(today.format_localized("%d %B %Y", self.locale).to_string());
+                self.selected_title = "Today".to_string();
                 self.selected_naive_date = Some(today.date_naive());
                 self.is_selected_today = true;
 
-                self.update_today_events_from_service();
                 self.update_selected_day_events();
                 self.refresh_marks();
                 self.redraw_days();
@@ -394,24 +336,19 @@ impl SimpleComponent for Calendar {
                 let today = Local::now();
                 let today_date = today.date_naive();
 
-                self.day_week = Self::capitalize_first(today.format_localized("%A", self.locale).to_string());
-                self.date = Self::capitalize_first(today.format_localized("%d %B %Y", self.locale).to_string());
-
                 if self.is_selected_today {
+                    self.selected_title = "Today".to_string();
                     self.selected_naive_date = Some(today_date);
-                    self.selected_date = Self::capitalize_first(
-                        today_date
-                            .format_localized("%A %d %B %Y", self.locale)
-                            .to_string(),
-                    );
                     self.is_selected_today = true;
                     self.display_year = today.year();
                     self.display_month = today.month();
                 } else {
                     self.is_selected_today = self.selected_naive_date == Some(today_date);
+                    if self.is_selected_today {
+                        self.selected_title = "Today".to_string();
+                    }
                 }
 
-                self.update_today_events_from_service();
                 self.update_selected_day_events();
                 self.refresh_marks();
                 self.redraw_days();
@@ -434,6 +371,19 @@ impl Calendar {
             label.add_css_class("caption");
             label.set_opacity(0.65);
             row.append(&label);
+        }
+    }
+
+    /// 选中日期的标题:今天/昨天/明天用相对说法,其余用 "星期几 日 月"
+    fn relative_title(date: NaiveDate, locale: Locale) -> String {
+        let today = Local::now().date_naive();
+        match (date - today).num_days() {
+            0 => "Today".to_string(),
+            1 => "Tomorrow".to_string(),
+            -1 => "Yesterday".to_string(),
+            _ => Self::capitalize_first(
+                date.format_localized("%A %d %B", locale).to_string(),
+            ),
         }
     }
 
@@ -527,21 +477,6 @@ impl Calendar {
         }
     }
 
-    fn update_today_events_from_service(&mut self) {
-        let today = Local::now().date_naive();
-        let events = self
-            .global_service
-            .calendar_service()
-            .get_events_for_date(today);
-
-        let mut today_events_guard = self.today_events.guard();
-        today_events_guard.clear();
-
-        for event in &events {
-            today_events_guard.push_back(Self::convert_event(event));
-        }
-    }
-
     fn update_selected_day_events(&mut self) {
         // Get events for selected day using new lazy API
         if let Some(naive_date) = self.selected_naive_date {
@@ -558,13 +493,18 @@ impl Calendar {
             return;
         };
 
+        let matched: Vec<&CalendarEvent> = events
+            .iter()
+            .filter(|event| event.start.date_naive() == selected_date)
+            .collect();
+
+        self.has_selected_events = !matched.is_empty();
+
         let mut events_guard = self.selected_day_events.guard();
         events_guard.clear();
 
-        for event in events {
-            if event.start.date_naive() == selected_date {
-                events_guard.push_back(Self::convert_event(event));
-            }
+        for event in matched {
+            events_guard.push_back(Self::convert_event(event));
         }
     }
 
