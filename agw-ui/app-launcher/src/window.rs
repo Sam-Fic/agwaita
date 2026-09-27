@@ -156,7 +156,7 @@ impl SimpleComponent for AppLauncherWindow {
                             add_css_class: "card",
                             inline_css: "
                             |border: none;
-                            |border-radius: 12px;
+                            |border-radius: 8px;
                             ".trim_margin().as_str(),
                             set_placeholder_text: Some("Search applications..."),
                             set_hexpand: true,
@@ -512,7 +512,9 @@ impl SimpleComponent for AppLauncherWindow {
                     }
                 }
 
-                // Apply border radius logic (round only first and last items)
+                // Apply concentric border-radius logic: the list card is 8px,
+                // rows sit flush (gap 0), so the first row carries an 8px top
+                // radius, the last row an 8px bottom radius, middle rows 0.
                 let position = list_item.position();
                 let n_items = selection_model_clone.n_items();
 
@@ -526,12 +528,30 @@ impl SimpleComponent for AppLauncherWindow {
                         .trim_margin()
                         .as_str(),
                     );
+                } else {
+                    css.push_str(
+                        "
+                        |border-bottom-left-radius: 8px;
+                        |border-bottom-right-radius: 8px;
+                        "
+                        .trim_margin()
+                        .as_str(),
+                    );
                 }
                 if position > 0 {
                     css.push_str(
                         "
                         |border-top-left-radius: 0px;
                         |border-top-right-radius: 0px;
+                        "
+                        .trim_margin()
+                        .as_str(),
+                    );
+                } else {
+                    css.push_str(
+                        "
+                        |border-top-left-radius: 8px;
+                        |border-top-right-radius: 8px;
                         "
                         .trim_margin()
                         .as_str(),

@@ -78,7 +78,7 @@ impl SimpleComponent for Calendar {
         gtk::Box {
             set_orientation: gtk::Orientation::Vertical,
             set_spacing: 10,
-            set_margin_all: 12,
+            // popover > contents 已有 12px padding,这里不再叠加,保证同心圆角链
 
             // ===== 表头:今天 =====
             gtk::Box {
