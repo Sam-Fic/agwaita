@@ -58,6 +58,8 @@ pub struct AppLauncherWindow {
     search_entry: gtk::SearchEntry,
     selection_model: gtk::SingleSelection,
     scrolled_window: gtk::ScrolledWindow,
+    /// 空搜索结果时的占位浮层
+    empty_label: gtk::Box,
     favorites_service: Option<Arc<Mutex<Option<FavoritesService>>>>,
     wm_service: Arc<WMService>,
 }
@@ -146,7 +148,7 @@ impl SimpleComponent for AppLauncherWindow {
 
                     gtk::Box {
                         set_orientation: gtk::Orientation::Vertical,
-                        set_spacing: 10,
+                        set_spacing: 12,
                         set_hexpand: true,
                         set_vexpand: true,
 
@@ -313,6 +315,20 @@ impl SimpleComponent for AppLauncherWindow {
 
         let sender_for_setup = sender.clone();
         let selection_model_for_setup = selection_model.clone();
+        // 每行的星星按钮状态:悬停或被选中时显示
+        let row_states: std::rc::Rc<
+            std::cell::RefCell<std::collections::HashMap<usize, std::rc::Rc<LauncherRowState>>>,
+        > = std::rc::Rc::new(std::cell::RefCell::new(std::collections::HashMap::new()));
+        {
+            let row_states = row_states.clone();
+            selection_model.connect_selection_changed(move |model, _, _| {
+                let selected = model.selected();
+                for state in row_states.borrow().values() {
+                    state.sync_visibility(selected);
+                }
+            });
+        }
+        let row_states_for_setup = row_states.clone();
         factory.connect_setup(move |_, list_item| {
             let list_item_ref = list_item.downcast_ref::<gtk::ListItem>().unwrap();
             let row = adw::ActionRow::new();
@@ -327,8 +343,37 @@ impl SimpleComponent for AppLauncherWindow {
             favorite_button.set_icon_name("non-starred-symbolic");
             // Flat circular action button: no chrome at rest, fully round
             // hover/active backdrop, sized down so it floats inside the row.
+            // Hidden until the row is hovered or selected (see row_states).
             favorite_button.add_css_class("flat");
             favorite_button.add_css_class("circular");
+            favorite_button.set_opacity(0.0);
+
+            // Star reveal: show when hovered, when the row is selected, or both.
+            let row_state = std::rc::Rc::new(LauncherRowState {
+                item: list_item_ref.clone(),
+                hovered: std::cell::Cell::new(false),
+                favorited: std::cell::Cell::new(false),
+                button: favorite_button.clone(),
+            });
+            row_states_for_setup
+                .borrow_mut()
+                .insert(list_item_ref.as_ptr() as usize, row_state.clone());
+            let motion = gtk::EventControllerMotion::new();
+            {
+                let state = row_state.clone();
+                let model = selection_model_for_setup.clone();
+                motion.connect_enter(move |_, _, _| {
+                    state.hovered.set(true);
+                    state.sync_visibility(model.selected());
+                });
+                let state = row_state.clone();
+                let model = selection_model_for_setup.clone();
+                motion.connect_leave(move |_| {
+                    state.hovered.set(false);
+                    state.sync_visibility(model.selected());
+                });
+            }
+            row.add_controller(motion);
 
             let aspect_frame = gtk::AspectFrame::builder()
                 .ratio(1.0)
@@ -381,6 +426,7 @@ impl SimpleComponent for AppLauncherWindow {
         let selection_model_clone = selection_model.clone();
         let icon_cache_clone = icon_cache.clone();
         let icon_theme_clone = icon_theme.clone();
+        let row_states_for_bind = row_states.clone();
         factory.connect_bind(move |_, list_item| {
             let list_item = list_item.downcast_ref::<gtk::ListItem>().unwrap();
             let row = list_item
@@ -503,6 +549,14 @@ impl SimpleComponent for AppLauncherWindow {
                                 button.set_icon_name("non-starred-symbolic");
                             }
 
+                            // 重新绑定行时同步星星可见性(已收藏/选中则常显)
+                            if let Some(state) =
+                                row_states_for_bind.borrow().get(&(list_item.as_ptr() as usize))
+                            {
+                                state.favorited.set(entry.is_favorite);
+                                state.sync_visibility(selection_model_clone.selected());
+                            }
+
                             // Store app_id in button for toggle handler
                             button.set_data("app-id", entry.id.clone());
 
@@ -570,6 +624,33 @@ impl SimpleComponent for AppLauncherWindow {
         let search_entry_ref = widgets.search_entry.clone();
         let scrolled_window_ref = widgets.scrolled_window.clone();
 
+        // Empty-state placeholder: floats over the list card while a search
+        // yields nothing.
+        let empty_icon = gtk::Image::builder()
+            .icon_name("system-search-symbolic")
+            .pixel_size(48)
+            .build();
+        let empty_text = gtk::Label::new(Some("No results"));
+        empty_text.add_css_class("title-4");
+        empty_text.add_css_class("dim-label");
+        let empty_label = gtk::Box::builder()
+            .orientation(gtk::Orientation::Vertical)
+            .spacing(12)
+            .halign(gtk::Align::Center)
+            .valign(gtk::Align::Center)
+            .build();
+        empty_label.append(&empty_icon);
+        empty_label.append(&empty_text);
+        empty_label.set_visible(false);
+
+        // Wrap the list view in an overlay so the placeholder can float
+        // above the (possibly empty) list card.
+        let list_overlay = gtk::Overlay::new();
+        scrolled_window_ref.set_child(None::<&gtk::Widget>);
+        list_overlay.set_child(Some(&list_view));
+        list_overlay.add_overlay(&empty_label);
+        scrolled_window_ref.set_child(Some(&list_overlay));
+
         // Initialize fuzzy searcher with all entries
         let mut searcher = AppSearcher::new();
         searcher.set_entries(entries.clone().apply(|this: &mut Vec<DesktopEntry>| {
@@ -586,6 +667,7 @@ impl SimpleComponent for AppLauncherWindow {
             search_entry: search_entry_ref,
             selection_model,
             scrolled_window: scrolled_window_ref,
+            empty_label,
             favorites_service: config.favorites_service,
             wm_service: config.wm_service,
         };
@@ -776,6 +858,9 @@ impl AppLauncherWindow {
                 }
             }
         }
+
+        // Empty search results -> show the "No results" placeholder.
+        self.empty_label.set_visible(self.filtered_apps.is_empty());
     }
 
     fn scroll_to_selected(&self) {
@@ -848,5 +933,22 @@ impl AppLauncherWindow {
             .replace("/usr/sbin/", "")
             .replace("/usr/local/bin/", "")
             .replace("/usr/local/sbin/", "")
+    }
+}
+
+/// Per-row favorite-star reveal state: the button is visible while the row
+/// is hovered or selected, hidden otherwise.
+struct LauncherRowState {
+    item: gtk::ListItem,
+    hovered: std::cell::Cell<bool>,
+    favorited: std::cell::Cell<bool>,
+    button: gtk::ToggleButton,
+}
+
+impl LauncherRowState {
+    fn sync_visibility(&self, selected: u32) {
+        let visible =
+            self.hovered.get() || self.favorited.get() || self.item.position() == selected;
+        self.button.set_opacity(if visible { 1.0 } else { 0.0 });
     }
 }
