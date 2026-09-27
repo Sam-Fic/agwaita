@@ -55,7 +55,7 @@ pub struct AppLauncherWindow {
     searcher: AppSearcher,
     filtered_apps: Vec<DesktopEntry>,
     list_view: gtk::ListView,
-    search_entry: gtk::Entry,
+    search_entry: gtk::SearchEntry,
     selection_model: gtk::SingleSelection,
     scrolled_window: gtk::ScrolledWindow,
     favorites_service: Option<Arc<Mutex<Option<FavoritesService>>>>,
@@ -137,7 +137,8 @@ impl SimpleComponent for AppLauncherWindow {
                     add_css_class: "card",
                     inline_css: "
                     |background-color: @window_bg_color;
-                    |padding: 15px;
+                    |border-radius: 20px;
+                    |padding: 12px;
                     ".trim_margin().as_str(),
                     set_orientation: gtk::Orientation::Vertical,
                     set_width_request: 640,
@@ -151,12 +152,12 @@ impl SimpleComponent for AppLauncherWindow {
 
                         // Search input
                         #[name = "search_entry"]
-                        gtk::Entry {
+                        gtk::SearchEntry {
                             add_css_class: "card",
-                            add_css_class: "frame",
                             inline_css: "
+                            |border: none;
+                            |border-radius: 12px;
                             |padding: 8px 12px;
-                            |outline: none;
                             ".trim_margin().as_str(),
                             set_placeholder_text: Some("Search applications..."),
                             set_hexpand: true,
@@ -325,11 +326,18 @@ impl SimpleComponent for AppLauncherWindow {
             // Create favorite toggle button
             let favorite_button = gtk::ToggleButton::new();
             favorite_button.set_icon_name("non-starred-symbolic");
+            // Flat circular action button: no chrome at rest, fully round
+            // hover/active backdrop, sized down so it floats inside the row.
+            favorite_button.add_css_class("flat");
+            favorite_button.add_css_class("circular");
 
             let aspect_frame = gtk::AspectFrame::builder()
                 .ratio(1.0)
                 .xalign(0.5)
                 .yalign(0.5)
+                .margin_top(6)
+                .margin_bottom(6)
+                .margin_end(6)
                 .child(&favorite_button)
                 .build();
 
