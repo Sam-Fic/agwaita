@@ -13,7 +13,7 @@ use chrono::{
     Datelike,
     Local,
     Locale,
-    Timelike,
+    NaiveDate,
 };
 use gtk4::prelude::*;
 use relm4::{
@@ -25,6 +25,7 @@ use relm4::{
     gtk,
 };
 use std::{
+    collections::HashSet,
     str::FromStr,
     sync::Arc,
 };
@@ -33,20 +34,34 @@ pub struct Calendar {
     day_week: String,
     date: String,
     selected_date: String,
-    selected_naive_date: Option<chrono::NaiveDate>,
+    selected_naive_date: Option<NaiveDate>,
     is_selected_today: bool,
     today_events: FactoryVecDeque<EventItem>,
     selected_day_events: FactoryVecDeque<EventItem>,
     locale: Locale,
     global_service: Arc<GlobalSystemService>,
-    calendar_widget: gtk::Calendar, // Store widget reference to mark days
+    /// 当前展示的年/月(导航用)
+    display_year: i32,
+    display_month: u32,
+    /// 展示月份中有事件安排的日期
+    marked_days: HashSet<u32>,
+    /// 表头下方显示的年/月标签
+    nav_month_label: gtk::Label,
+    nav_year_label: gtk::Label,
+    /// 日期网格容器
+    days_grid: gtk::Grid,
+    /// 重建网格时给日期按钮发送点击事件用
+    sender_for_redraw: ComponentSender<Self>,
     _day_handler: Option<SignalHandler>,
 }
 
 #[derive(Debug)]
 pub enum CalendarInput {
-    DaySelected(gtk::glib::DateTime),
-    MonthChanged,
+    /// 点击某个日期格
+    DaySelected(NaiveDate),
+    /// 月/年导航,参数为 +/-1
+    NavMonth(i32),
+    NavYear(i32),
     UpdateEvents(Vec<CalendarEvent>),
     ResetToToday,
     DayChanged,
@@ -62,59 +77,122 @@ impl SimpleComponent for Calendar {
         #[root]
         gtk::Box {
             set_orientation: gtk::Orientation::Vertical,
-            set_spacing: 8,
+            set_spacing: 10,
+            set_margin_all: 12,
 
-            gtk::Label {
-                add_css_class: "title-5",
-                inline_css: "
-                |font-weight: bold;
-                ".trim_margin().as_str(),
+            // ===== 表头:今天 =====
+            gtk::Box {
+                set_orientation: gtk::Orientation::Vertical,
+                set_spacing: 2,
 
-                #[watch]
-                set_label: &model.day_week,
-            },
-            gtk::Label {
-                add_css_class: "title-4",
+                gtk::Label {
+                    add_css_class: "title-5",
+                    inline_css: "
+                    |font-weight: bold;
+                    ".trim_margin().as_str(),
 
-                #[watch]
-                set_label: &model.date,
-            },
-            #[name = "calendar_widget"]
-            gtk::Calendar {
-                inline_css: "
-                |background: transparent;
-                |box-shadow: none;
-                |border: none;
-                |outline: none;
-                ".trim_margin().as_str(),
-
-                connect_day_selected[sender] => move |cal| {
-                    sender.input(CalendarInput::DaySelected(cal.date()));
+                    #[watch]
+                    set_label: &model.day_week,
                 },
+                gtk::Label {
+                    add_css_class: "title-4",
 
-                connect_next_month[sender] => move |_| {
-                    sender.input(CalendarInput::MonthChanged);
-                },
-
-                connect_prev_month[sender] => move |_| {
-                    sender.input(CalendarInput::MonthChanged);
-                },
-
-                connect_next_year[sender] => move |_| {
-                    sender.input(CalendarInput::MonthChanged);
-                },
-
-                connect_prev_year[sender] => move |_| {
-                    sender.input(CalendarInput::MonthChanged);
+                    #[watch]
+                    set_label: &model.date,
                 },
             },
-            gtk::Separator {},
+
+            // ===== 月/年导航 =====
+            gtk::Box {
+                set_orientation: gtk::Orientation::Horizontal,
+                set_halign: gtk::Align::Center,
+                set_spacing: 16,
+
+                gtk::Box {
+                    set_orientation: gtk::Orientation::Horizontal,
+                    set_spacing: 2,
+
+                    gtk::Button {
+                        add_css_class: "flat",
+                        add_css_class: "circular",
+                        set_icon_name: "pan-start-symbolic",
+
+                        connect_clicked[sender] => move |_| {
+                            sender.input(CalendarInput::NavMonth(-1));
+                        },
+                    },
+                    #[name = "nav_month_label"]
+                    gtk::Label {
+                        set_width_request: 86,
+                        set_xalign: 0.5,
+                    },
+                    gtk::Button {
+                        add_css_class: "flat",
+                        add_css_class: "circular",
+                        set_icon_name: "pan-end-symbolic",
+
+                        connect_clicked[sender] => move |_| {
+                            sender.input(CalendarInput::NavMonth(1));
+                        },
+                    },
+                },
+                gtk::Box {
+                    set_orientation: gtk::Orientation::Horizontal,
+                    set_spacing: 2,
+
+                    gtk::Button {
+                        add_css_class: "flat",
+                        add_css_class: "circular",
+                        set_icon_name: "pan-start-symbolic",
+
+                        connect_clicked[sender] => move |_| {
+                            sender.input(CalendarInput::NavYear(-1));
+                        },
+                    },
+                    #[name = "nav_year_label"]
+                    gtk::Label {
+                        set_width_request: 52,
+                        set_xalign: 0.5,
+                    },
+                    gtk::Button {
+                        add_css_class: "flat",
+                        add_css_class: "circular",
+                        set_icon_name: "pan-end-symbolic",
+
+                        connect_clicked[sender] => move |_| {
+                            sender.input(CalendarInput::NavYear(1));
+                        },
+                    },
+                },
+            },
+
+            // ===== 星期表头 =====
+            #[name = "weekday_row"]
+            gtk::Box {
+                set_orientation: gtk::Orientation::Horizontal,
+                set_halign: gtk::Align::Center,
+                set_spacing: 2,
+            },
+
+            // ===== 日期网格 =====
+            #[name = "days_grid"]
+            gtk::Grid {
+                set_halign: gtk::Align::Center,
+                set_row_spacing: 2,
+                set_column_spacing: 2,
+            },
+
+            gtk::Separator {
+                set_margin_top: 4,
+            },
+
+            // ===== 日程列表 =====
             gtk::ScrolledWindow {
                 set_propagate_natural_width: true,
                 set_propagate_natural_height: true,
                 set_hexpand: true,
                 set_vexpand: true,
-                set_width_request: 320,
+                set_width_request: 320 - 24,
                 set_max_content_height: 320,
 
                 gtk::Box {
@@ -164,7 +242,7 @@ impl SimpleComponent for Calendar {
                         #[local_ref]
                         selected_events_box -> gtk::Box {
                             set_orientation: gtk::Orientation::Vertical,
-                            set_width_request: 320 - 16,
+                            set_width_request: 320 - 24,
                             set_can_focus: false,
                             set_focusable: false,
                             set_spacing: 8,
@@ -193,13 +271,19 @@ impl SimpleComponent for Calendar {
             day_week: Self::capitalize_first(now.format_localized("%A", locale).to_string()),
             date: Self::capitalize_first(now.format_localized("%d %B %Y", locale).to_string()),
             selected_date: Self::capitalize_first(now.format_localized("%d %B %Y", locale).to_string()),
-            selected_naive_date: None,
+            selected_naive_date: Some(now.date_naive()),
             is_selected_today: true,
             today_events,
             selected_day_events,
             locale,
             global_service,
-            calendar_widget: gtk::Calendar::new(), // Temporary, will be replaced
+            display_year: now.year(),
+            display_month: now.month(),
+            marked_days: HashSet::new(),
+            nav_month_label: gtk::Label::default(),
+            nav_year_label: gtk::Label::default(),
+            days_grid: gtk::Grid::new(),
+            sender_for_redraw: sender.clone(),
             _day_handler: None,
         };
 
@@ -208,17 +292,18 @@ impl SimpleComponent for Calendar {
 
         let widgets = view_output!();
 
-        // Replace with actual widget reference
         let mut model = Calendar {
-            calendar_widget: widgets.calendar_widget.clone(),
+            nav_month_label: widgets.nav_month_label.clone(),
+            nav_year_label: widgets.nav_year_label.clone(),
+            days_grid: widgets.days_grid.clone(),
             ..model
         };
 
+        // 星期表头(周日起,与日期网格一致)
+        Self::fill_weekday_row(&widgets.weekday_row, model.locale);
+
         // Load initial events and mark days
         sender.input(CalendarInput::UpdateEvents(Vec::new()));
-
-        // Mark days with events for current month
-        sender.input(CalendarInput::MonthChanged);
 
         // Subscribe to calendar events updates
         let receiver = model.global_service.subscribe();
@@ -249,87 +334,56 @@ impl SimpleComponent for Calendar {
     fn update(&mut self, message: Self::Input, #[allow(unused_variables)] sender: ComponentSender<Self>) {
         match message {
             CalendarInput::DaySelected(date) => {
-                let year = date.year();
-                let month = date.month() as u32;
-                let day = date.day_of_month() as u32;
+                self.selected_naive_date = Some(date);
+                self.selected_date = Self::capitalize_first(
+                    date.format_localized("%A %d %B %Y", self.locale).to_string(),
+                );
 
-                if let Some(naive_date) = chrono::NaiveDate::from_ymd_opt(year, month, day) {
-                    self.selected_date = Self::capitalize_first(
-                        naive_date
-                            .format_localized("%A %d %B %Y", self.locale)
-                            .to_string(),
-                    );
-
-                    let today = Local::now().date_naive();
-                    self.is_selected_today = naive_date == today;
-                    self.selected_naive_date = Some(naive_date);
-
-                    // Update selected day events
-                    self.update_selected_day_events();
-                }
-            },
-            CalendarInput::MonthChanged => {
-                // Mark days with events for the visible month
-                self.mark_days_with_events();
-
-                // Update events for the selected day (GTK Calendar keeps day selection when changing months)
-                // GTK Calendar keeps the same day number, so we need to read the current selection
-                let date = self.calendar_widget.date();
-                let year = date.year();
-                let month = date.month() as u32;
-                let day = date.day_of_month() as u32;
-
-                if let Some(naive_date) = chrono::NaiveDate::from_ymd_opt(year, month, day) {
-                    log::debug!("MonthChanged: updating selected date to {}", naive_date);
-                    self.selected_naive_date = Some(naive_date);
-                    self.selected_date = Self::capitalize_first(
-                        naive_date
-                            .format_localized("%A %d %B %Y", self.locale)
-                            .to_string(),
-                    );
-                    let today = Local::now().date_naive();
-                    self.is_selected_today = naive_date == today;
-                }
+                let today = Local::now().date_naive();
+                self.is_selected_today = date == today;
 
                 self.update_selected_day_events();
+                self.redraw_days();
+            },
+            CalendarInput::NavMonth(delta) => {
+                let (mut year, mut month) = (self.display_year, self.display_month as i32 - 1 + delta);
+                if month < 0 {
+                    month += 12;
+                    year -= 1;
+                } else if month > 11 {
+                    month -= 12;
+                    year += 1;
+                }
+                self.display_year = year;
+                self.display_month = month as u32 + 1;
+                self.refresh_marks();
+                self.redraw_days();
+            },
+            CalendarInput::NavYear(delta) => {
+                self.display_year += delta as i32;
+                self.refresh_marks();
+                self.redraw_days();
             },
             CalendarInput::UpdateEvents(_events) => {
-                // Calendar data changed - fetch events using lazy API
                 self.update_today_events_from_service();
                 self.update_selected_day_events();
-
-                // Refresh day markers
-                self.mark_days_with_events();
+                self.refresh_marks();
+                self.redraw_days();
             },
             CalendarInput::ResetToToday => {
-                // Reset calendar to today's date
                 let today = Local::now();
-                let today_date = today.date_naive();
-                let today_time = today.time();
-                let glib_date = gtk::glib::DateTime::from_local(
-                    today_date.year(),
-                    today_date.month() as i32,
-                    today_date.day() as i32,
-                    today_time.hour() as i32,
-                    today_time.minute() as i32,
-                    today_time.second() as f64,
-                )
-                .unwrap();
-
-                // Select today's date in the calendar widget
-                self.calendar_widget.set_date(&glib_date);
-
-                // Update the view
+                self.display_year = today.year();
+                self.display_month = today.month();
                 self.day_week = Self::capitalize_first(today.format_localized("%A", self.locale).to_string());
                 self.date = Self::capitalize_first(today.format_localized("%d %B %Y", self.locale).to_string());
                 self.selected_date = Self::capitalize_first(today.format_localized("%d %B %Y", self.locale).to_string());
                 self.selected_naive_date = Some(today.date_naive());
                 self.is_selected_today = true;
 
-                // Update events
                 self.update_today_events_from_service();
                 self.update_selected_day_events();
-                self.mark_days_with_events();
+                self.refresh_marks();
+                self.redraw_days();
             },
             CalendarInput::DayChanged => {
                 let today = Local::now();
@@ -339,18 +393,6 @@ impl SimpleComponent for Calendar {
                 self.date = Self::capitalize_first(today.format_localized("%d %B %Y", self.locale).to_string());
 
                 if self.is_selected_today {
-                    let today_time = today.time();
-                    let glib_date = gtk::glib::DateTime::from_local(
-                        today_date.year(),
-                        today_date.month() as i32,
-                        today_date.day() as i32,
-                        today_time.hour() as i32,
-                        today_time.minute() as i32,
-                        today_time.second() as f64,
-                    )
-                    .unwrap();
-
-                    self.calendar_widget.set_date(&glib_date);
                     self.selected_naive_date = Some(today_date);
                     self.selected_date = Self::capitalize_first(
                         today_date
@@ -358,19 +400,128 @@ impl SimpleComponent for Calendar {
                             .to_string(),
                     );
                     self.is_selected_today = true;
+                    self.display_year = today.year();
+                    self.display_month = today.month();
                 } else {
                     self.is_selected_today = self.selected_naive_date == Some(today_date);
                 }
 
                 self.update_today_events_from_service();
                 self.update_selected_day_events();
-                self.mark_days_with_events();
+                self.refresh_marks();
+                self.redraw_days();
             },
         }
     }
 }
 
 impl Calendar {
+    /// 填充星期表头(周日起,与日期网格一致)
+    fn fill_weekday_row(row: &gtk::Box, locale: Locale) {
+        let today = Local::now().date_naive();
+        let sunday = today - chrono::Duration::days(today.weekday().num_days_from_sunday() as i64);
+
+        for i in 0..7 {
+            let day = sunday + chrono::Duration::days(i);
+            let label = gtk::Label::new(Some(&day.format_localized("%a", locale).to_string()));
+            label.set_width_request(38);
+            label.set_halign(gtk::Align::Center);
+            label.add_css_class("caption");
+            label.set_opacity(0.65);
+            row.append(&label);
+        }
+    }
+
+    /// 刷新展示月份的事件日期标记并同步导航标签
+    fn refresh_marks(&mut self) {
+        self.nav_month_label.set_text(
+            &Self::capitalize_first(
+                NaiveDate::from_ymd_opt(self.display_year, self.display_month, 1)
+                    .unwrap()
+                    .format_localized("%B", self.locale)
+                    .to_string(),
+            ),
+        );
+        self.nav_year_label.set_text(&self.display_year.to_string());
+
+        self.marked_days = self
+            .global_service
+            .calendar_service()
+            .get_days_with_events(self.display_year, self.display_month)
+            .into_iter()
+            .collect();
+    }
+
+    /// 重建日期网格:7 列 x 6 行,38px 圆形单元格
+    fn redraw_days(&self) {
+        while let Some(child) = self.days_grid.first_child() {
+            self.days_grid.remove(&child);
+        }
+
+        let Some(first_of_month) = NaiveDate::from_ymd_opt(self.display_year, self.display_month, 1) else {
+            return;
+        };
+        let today = Local::now().date_naive();
+        // 网格从周日开始
+        let grid_start = first_of_month - chrono::Duration::days(first_of_month.weekday().num_days_from_sunday() as i64);
+
+        for i in 0..42 {
+            let date = grid_start + chrono::Duration::days(i);
+            let day = date.day();
+            let in_month = date.year() == self.display_year && date.month() == self.display_month;
+
+            let button = gtk::Button::new();
+            button.set_size_request(38, 38);
+            button.add_css_class("flat");
+            button.add_css_class("circular");
+
+            let overlay = gtk::Overlay::new();
+            let label = gtk::Label::new(Some(&day.to_string()));
+
+            if date == today {
+                label.set_markup(&format!("<b>{}</b>", day));
+                button.inline_css("border: 2px solid @accent_color;");
+            }
+
+            if Some(date) == self.selected_naive_date {
+                button.remove_css_class("flat");
+                button.add_css_class("accent");
+                label.set_markup(&format!(
+                    "<b><span foreground=\"#ffffff\">{}</span></b>",
+                    day
+                ));
+            }
+
+            if !in_month {
+                button.set_opacity(0.35);
+            }
+
+            overlay.set_child(Some(&label));
+
+            // 有事件的日期:底部小圆点
+            if in_month && self.marked_days.contains(&day) {
+                let dot = gtk::Label::new(None);
+                dot.set_valign(gtk::Align::End);
+                dot.set_margin_bottom(4);
+                dot.set_size_request(4, 4);
+                dot.inline_css("background: @accent_color; border-radius: 2px; min-width: 4px; min-height: 4px;");
+                overlay.add_overlay(&dot);
+            }
+
+            button.set_child(Some(&overlay));
+            button.set_tooltip_text(Some(&date.format_localized("%x", self.locale).to_string()));
+
+            let sender = self.sender_for_redraw.clone();
+            button.connect_clicked(move |_| {
+                sender.input(CalendarInput::DaySelected(date));
+            });
+
+            let col = (i % 7) as i32;
+            let row = (i / 7) as i32;
+            self.days_grid.attach(&button, col, row, 1, 1);
+        }
+    }
+
     fn update_today_events_from_service(&mut self) {
         let today = Local::now().date_naive();
         let events = self
@@ -423,28 +574,6 @@ impl Calendar {
                 .clone()
                 .unwrap_or_else(|| "@accent_color".to_string()),
             is_all_day: event.is_all_day,
-        }
-    }
-
-    /// Mark days with events on the gtk::Calendar widget
-    fn mark_days_with_events(&self) {
-        // Get current displayed month/year from calendar widget
-        let date = self.calendar_widget.date();
-        let year = date.year();
-        let month = date.month() as u32;
-
-        // Clear all marks
-        self.calendar_widget.clear_marks();
-
-        // Get days with events for this month
-        let days = self
-            .global_service
-            .calendar_service()
-            .get_days_with_events(year, month);
-
-        // Mark each day that has events
-        for day in days {
-            self.calendar_widget.mark_day(day);
         }
     }
 }
