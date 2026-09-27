@@ -33,24 +33,25 @@ pub fn create_notification_widget(notification: &Notification, store: &Arc<Notif
                 // Header
                 gtk::Box {
                     set_spacing: 8,
-                    set_margin_all: 8,
-                    set_margin_top: 12,
-                    set_margin_start: 16,
-                    set_margin_end: 12,
+                    set_margin_start: 12,
+                    set_margin_end: 8,
+                    set_margin_top: 8,
+                    set_margin_bottom: 8,
 
                     #[name = "app_icon"]
                     gtk::Image {
                         set_icon_size: gtk::IconSize::Normal,
-                        set_margin_end: 16,
+                        set_pixel_size: 16,
+                        set_valign: gtk::Align::Center,
                     },
 
                     #[name = "app_name_label"]
                     gtk::Label {
                         inline_css: "
-                        |font-style: italic;
+                        |font-weight: bold;
                         ".trim_margin().as_str(),
                         set_halign: gtk::Align::Start,
-                        set_valign: gtk::Align::Fill,
+                        set_valign: gtk::Align::Center,
                         set_ellipsize: gtk::pango::EllipsizeMode::End,
                     },
 
@@ -59,13 +60,16 @@ pub fn create_notification_widget(notification: &Notification, store: &Arc<Notif
                         add_css_class: "caption",
                         set_hexpand: true,
                         set_halign: gtk::Align::End,
-                        set_valign: gtk::Align::Fill,
+                        set_valign: gtk::Align::Center,
                     },
 
                     #[name = "close_button"]
                     gtk::Button {
                         set_icon_name: "window-close-symbolic",
-                        set_margin_start: 16,
+                        add_css_class: "flat",
+                        add_css_class: "circular",
+                        set_valign: gtk::Align::Center,
+                        set_height_request: 26,
                     },
                 },
 
@@ -121,6 +125,7 @@ pub fn create_notification_widget(notification: &Notification, store: &Arc<Notif
                 },
 
                 // Actions
+                #[name = "actions_scroll"]
                 gtk::ScrolledWindow {
                     set_vexpand: true,
                     set_hexpand: true,
@@ -196,8 +201,8 @@ pub fn create_notification_widget(notification: &Notification, store: &Arc<Notif
         for action in &notification.actions {
             let button = gtk::Button::builder()
                 .label(&action.label)
+                .css_classes(["flat", "pill"])
                 .hexpand(true)
-                .halign(gtk::Align::Center)
                 .build();
 
             // Connect action button to invoke via DBus
@@ -220,8 +225,11 @@ pub fn create_notification_widget(notification: &Notification, store: &Arc<Notif
             actions_box.append(&button);
         }
         actions_box.set_visible(true);
+        actions_scroll.set_visible(true);
     } else {
-        actions_box.set_visible(false);
+        // Hide the whole vexpand'd area so empty notifications don't
+        // reserve dead space at the bottom.
+        actions_scroll.set_visible(false);
     }
 
     root_box
@@ -259,6 +267,7 @@ pub struct NotificationItemWidget {
     summary_label: gtk::Label,
     body_label: gtk::Label,
     actions_box: gtk::Box,
+    actions_scroll: gtk::ScrolledWindow,
     store: Option<Arc<NotificationStore>>,
 }
 
@@ -292,24 +301,25 @@ impl RelmListItem for NotificationWithContext {
                     // Header
                     gtk::Box {
                         set_spacing: 8,
-                        set_margin_all: 8,
-                        set_margin_top: 12,
-                        set_margin_start: 16,
-                        set_margin_end: 12,
+                        set_margin_start: 12,
+                        set_margin_end: 8,
+                        set_margin_top: 8,
+                        set_margin_bottom: 8,
 
                         #[name = "app_icon"]
                         gtk::Image {
                             set_icon_size: gtk::IconSize::Normal,
-                            set_margin_end: 16,
+                            set_pixel_size: 16,
+                            set_valign: gtk::Align::Center,
                         },
 
                         #[name = "app_name_label"]
                         gtk::Label {
                             inline_css: "
-                            |font-style: italic;
+                            |font-weight: bold;
                             ".trim_margin().as_str(),
                             set_halign: gtk::Align::Start,
-                            set_valign: gtk::Align::Fill,
+                            set_valign: gtk::Align::Center,
                             set_ellipsize: gtk::pango::EllipsizeMode::End,
                         },
 
@@ -318,13 +328,16 @@ impl RelmListItem for NotificationWithContext {
                             add_css_class: "caption",
                             set_hexpand: true,
                             set_halign: gtk::Align::End,
-                            set_valign: gtk::Align::Fill,
+                            set_valign: gtk::Align::Center,
                         },
 
                         #[name = "close_button"]
                         gtk::Button {
                             set_icon_name: "window-close-symbolic",
-                            set_margin_start: 16,
+                            add_css_class: "flat",
+                            add_css_class: "circular",
+                            set_valign: gtk::Align::Center,
+                            set_height_request: 26,
                         },
                     },
 
@@ -333,9 +346,9 @@ impl RelmListItem for NotificationWithContext {
                     // Body
                     gtk::Box {
                         set_spacing: 8,
-                        set_margin_all: 8,
-                        set_margin_top: 6,
+                        set_margin_top: 10,
                         set_margin_horizontal: 12,
+                        set_margin_bottom: 12,
 
                         #[name = "notification_image"]
                         gtk::Image {
@@ -380,6 +393,7 @@ impl RelmListItem for NotificationWithContext {
                     },
 
                     // Actions
+                    #[name = "actions_scroll"]
                     gtk::ScrolledWindow {
                         set_vexpand: true,
                         set_hexpand: true,
@@ -404,6 +418,7 @@ impl RelmListItem for NotificationWithContext {
             summary_label,
             body_label,
             actions_box,
+            actions_scroll,
             store: None,
         };
 
@@ -487,7 +502,7 @@ impl RelmListItem for NotificationWithContext {
                     let button = gtk::Button::builder()
                         .label(&action.label)
                         .hexpand(true)
-                        .halign(gtk::Align::Center)
+                        .css_classes(["flat", "pill"])
                         .build();
 
                     // Connect action button to invoke via DBus
@@ -509,8 +524,9 @@ impl RelmListItem for NotificationWithContext {
                 }
             }
             widgets.actions_box.set_visible(true);
+            widgets.actions_scroll.set_visible(true);
         } else {
-            widgets.actions_box.set_visible(false);
+            widgets.actions_scroll.set_visible(false);
         }
     }
 }

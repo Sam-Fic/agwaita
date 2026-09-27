@@ -101,9 +101,11 @@ impl SimpleComponent for NotificationList {
                         gtk::Image {
                             set_icon_name: Some("notifications-disabled-symbolic"),
                             set_pixel_size: 64,
+                            inline_css: "opacity: 0.4;",
                         },
                         gtk::Label {
-                            add_css_class: "title-1",
+                            add_css_class: "title-2",
+                            inline_css: "opacity: 0.6;",
                             set_label: "No notifications",
                         }
                     }
