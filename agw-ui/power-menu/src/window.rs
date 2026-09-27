@@ -105,7 +105,8 @@ impl SimpleComponent for PowerMenuWindow {
                 add_css_class: "card",
                 inline_css: "
                 |background-color: @window_bg_color;
-                |padding: 15px;
+                |border-radius: 20px;
+                |padding: 12px;
                 ".trim_margin().as_str(),
                 set_halign: gtk::Align::Center,
                 set_valign: gtk::Align::Center,

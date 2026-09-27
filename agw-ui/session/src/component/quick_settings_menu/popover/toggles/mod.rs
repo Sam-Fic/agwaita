@@ -136,7 +136,6 @@ impl SimpleComponent for ToggleButtons {
                     gtk::Box {
                         set_orientation: gtk::Orientation::Horizontal,
                         set_spacing: 8,
-
                         gtk::Image {
                             #[watch]
                             set_icon_name: match model.airplane_mode_enabled {
@@ -171,7 +170,7 @@ impl SimpleComponent for ToggleButtons {
                         gtk::Label {
                             set_hexpand: true,
                             set_label: "Power Mode",
-                            set_align: gtk::Align::Start,
+                            set_xalign: 0.0,
                         },
                         gtk::Image {
                             #[watch]
@@ -193,45 +192,59 @@ impl SimpleComponent for ToggleButtons {
 
                 gtk::Box {
                     add_css_class: "card",
-                    inline_css: "padding: 8px;",
+                    inline_css: "padding: 10px;",
                     set_orientation: gtk::Orientation::Vertical,
-                    set_spacing: 8,
+                    set_spacing: 6,
                     set_margin_vertical: 4,
 
                     gtk::Box {
-                        set_margin_horizontal: 8,
+                        set_margin_horizontal: 4,
                         set_orientation: gtk::Orientation::Horizontal,
-                        set_spacing: 16,
+                        set_spacing: 8,
 
                         gtk::Image {
-                            set_icon_name: Some("resources-symbolic"),
-                            set_icon_size: gtk::IconSize::Large,
+                            #[watch]
+                            set_icon_name: match model.power_profile {
+                                PowerProfile::PowerSaver => Some("power-profile-power-saver-symbolic"),
+                                PowerProfile::Balanced => Some("power-profile-balanced-symbolic"),
+                                PowerProfile::Performance => Some("power-profile-performance-symbolic"),
+                            },
+                            set_icon_size: gtk::IconSize::Normal,
                         },
                         gtk::Label {
-                            add_css_class: "title-1",
+                            add_css_class: "title-4",
                             set_label: "Power Mode",
                         },
                     },
 
-                    #[name = "power_saver_button"]
-                    gtk::ToggleButton {
-                        set_label: "Power Saver",
-                        #[watch]
-                        set_active: model.power_profile == PowerProfile::PowerSaver,
-                    },
+                    gtk::Box {
+                        set_orientation: gtk::Orientation::Horizontal,
+                        set_spacing: 6,
+                        set_homogeneous: true,
 
-                    #[name = "balanced_button"]
-                    gtk::ToggleButton {
-                        set_label: "Balanced",
-                        #[watch]
-                        set_active: model.power_profile == PowerProfile::Balanced,
-                    },
+                        #[name = "power_saver_button"]
+                        gtk::ToggleButton {
+                            set_label: "Power Saver",
+                            inline_css: "padding: 6px 8px;",
+                            #[watch]
+                            set_active: model.power_profile == PowerProfile::PowerSaver,
+                        },
 
-                    #[name = "performance_button"]
-                    gtk::ToggleButton {
-                        set_label: "Performance",
-                        #[watch]
-                        set_active: model.power_profile == PowerProfile::Performance,
+                        #[name = "balanced_button"]
+                        gtk::ToggleButton {
+                            set_label: "Balanced",
+                            inline_css: "padding: 6px 8px;",
+                            #[watch]
+                            set_active: model.power_profile == PowerProfile::Balanced,
+                        },
+
+                        #[name = "performance_button"]
+                        gtk::ToggleButton {
+                            set_label: "Performance",
+                            inline_css: "padding: 6px 8px;",
+                            #[watch]
+                            set_active: model.power_profile == PowerProfile::Performance,
+                        },
                     },
                 },
             },
@@ -252,7 +265,6 @@ impl SimpleComponent for ToggleButtons {
                     gtk::Box {
                         set_orientation: gtk::Orientation::Horizontal,
                         set_spacing: 8,
-
                         gtk::Image {
                             #[watch]
                             set_icon_name: match model.dark_mode_enabled {
@@ -284,7 +296,7 @@ impl SimpleComponent for ToggleButtons {
                         gtk::Label {
                             set_hexpand: true,
                             set_label: "Accent Color",
-                            set_align: gtk::Align::Start,
+                            set_xalign: 0.0,
                         },
                         gtk::Image {
                             #[watch]
@@ -307,36 +319,39 @@ impl SimpleComponent for ToggleButtons {
 
                 gtk::Box {
                     add_css_class: "card",
-                    inline_css: "padding: 8px;",
+                    inline_css: "padding: 10px;",
                     set_orientation: gtk::Orientation::Vertical,
                     set_spacing: 8,
                     set_margin_vertical: 4,
 
                     gtk::Box {
-                        set_margin_horizontal: 8,
+                        set_margin_horizontal: 4,
                         set_orientation: gtk::Orientation::Horizontal,
-                        set_spacing: 16,
+                        set_spacing: 8,
 
                         gtk::Image {
                             inline_css: "color: var(--accent-color);",
                             set_icon_name: Some("org.gnome.Settings-color-symbolic"),
-                            set_icon_size: gtk::IconSize::Large,
+                            set_icon_size: gtk::IconSize::Normal,
                         },
                         gtk::Label {
-                            add_css_class: "title-1",
+                            add_css_class: "title-4",
                             set_label: "Accent Color",
                         },
                     },
 
                     gtk::FlowBox {
-                        set_column_spacing: 4,
-                        set_row_spacing: 4,
+                        add_css_class: "accent-swatch-flow",
+                        set_column_spacing: 10,
+                        set_row_spacing: 10,
                         set_homogeneous: true,
                         set_selection_mode: gtk::SelectionMode::None,
                         set_max_children_per_line: 7,
 
                         #[name = "blue_button"]
                         gtk::ToggleButton {
+                            set_halign: gtk::Align::Center,
+                            set_valign: gtk::Align::Center,
                             inline_css: "background-color: var(--accent-blue);",
 
                             #[watch]
@@ -347,6 +362,8 @@ impl SimpleComponent for ToggleButtons {
 
                         #[name = "teal_button"]
                         gtk::ToggleButton {
+                            set_halign: gtk::Align::Center,
+                            set_valign: gtk::Align::Center,
                             inline_css: "background-color: var(--accent-teal);",
 
                             #[watch]
@@ -357,6 +374,8 @@ impl SimpleComponent for ToggleButtons {
 
                         #[name = "green_button"]
                         gtk::ToggleButton {
+                            set_halign: gtk::Align::Center,
+                            set_valign: gtk::Align::Center,
                             inline_css: "background-color: var(--accent-green);",
 
                             #[watch]
@@ -367,6 +386,8 @@ impl SimpleComponent for ToggleButtons {
 
                         #[name = "yellow_button"]
                         gtk::ToggleButton {
+                            set_halign: gtk::Align::Center,
+                            set_valign: gtk::Align::Center,
                             inline_css: "background-color: var(--accent-yellow);",
 
                             #[watch]
@@ -377,6 +398,8 @@ impl SimpleComponent for ToggleButtons {
 
                         #[name = "orange_button"]
                         gtk::ToggleButton {
+                            set_halign: gtk::Align::Center,
+                            set_valign: gtk::Align::Center,
                             inline_css: "background-color: var(--accent-orange);",
 
                             #[watch]
@@ -387,6 +410,8 @@ impl SimpleComponent for ToggleButtons {
 
                         #[name = "red_button"]
                         gtk::ToggleButton {
+                            set_halign: gtk::Align::Center,
+                            set_valign: gtk::Align::Center,
                             inline_css: "background-color: var(--accent-red);",
 
                             #[watch]
@@ -397,6 +422,8 @@ impl SimpleComponent for ToggleButtons {
 
                         #[name = "pink_button"]
                         gtk::ToggleButton {
+                            set_halign: gtk::Align::Center,
+                            set_valign: gtk::Align::Center,
                             inline_css: "background-color: var(--accent-pink);",
 
                             #[watch]
@@ -407,6 +434,8 @@ impl SimpleComponent for ToggleButtons {
 
                         #[name = "purple_button"]
                         gtk::ToggleButton {
+                            set_halign: gtk::Align::Center,
+                            set_valign: gtk::Align::Center,
                             inline_css: "background-color: var(--accent-purple);",
 
                             #[watch]
@@ -417,6 +446,8 @@ impl SimpleComponent for ToggleButtons {
 
                         #[name = "slate_button"]
                         gtk::ToggleButton {
+                            set_halign: gtk::Align::Center,
+                            set_valign: gtk::Align::Center,
                             inline_css: "background-color: var(--accent-slate);",
 
                             #[watch]
@@ -445,7 +476,6 @@ impl SimpleComponent for ToggleButtons {
                     gtk::Box {
                         set_orientation: gtk::Orientation::Horizontal,
                         set_spacing: 8,
-
                         gtk::Image {
                             #[watch]
                             set_icon_name: match model.dnd_enabled {
@@ -666,8 +696,15 @@ impl SimpleComponent for ToggleButtons {
         // Connect bluetooth button signal
         let output_sender = sender.output_sender().clone();
         widgets.bluetooth_button.connect_clicked(move |_| {
-            if let Err(e) = Command::new("agwaita").arg("bluetooth-manager").spawn() {
-                log::error!("Failed to launch bluetooth-manager: {}", e);
+            // Resolve via current_exe: the session's PATH may not contain
+            // the install dir (~/.local/bin).
+            match std::env::current_exe() {
+                Ok(exe) => {
+                    if let Err(e) = Command::new(exe).arg("bluetooth-manager").spawn() {
+                        log::error!("Failed to launch bluetooth-manager: {}", e);
+                    }
+                },
+                Err(e) => log::error!("Failed to resolve agwaita executable: {}", e),
             }
             // Request popover to close
             output_sender.send(ToggleButtonsOutput::ClosePopover).ok();

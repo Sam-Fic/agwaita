@@ -88,8 +88,7 @@ impl Notification {
 
     pub fn urgency_css_class(&self) -> &str {
         match self.urgency {
-            NotificationUrgency::Low => "border: 1px solid var(--border-color);",
-            NotificationUrgency::Normal => "border: 1px solid var(--accent-color);",
+            NotificationUrgency::Low | NotificationUrgency::Normal => "",
             NotificationUrgency::Critical => "border: 1px solid var(--error-color);",
         }
     }

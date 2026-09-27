@@ -40,18 +40,18 @@ impl FactoryComponent for EventItem {
             gtk::Box {
                 inline_css: &format!("
                 |background: {};
-                |border-top-left-radius: 5px;
-                |border-bottom-left-radius: 5px;
+                |border-top-left-radius: 8px;
+                |border-bottom-left-radius: 8px;
                 ", self.event.color).trim_margin().as_str(),
                 set_orientation: gtk::Orientation::Vertical,
-                set_width_request: 4,
+                set_width_request: 8,
             },
 
             gtk::Box {
                 inline_css: &format!("
                 |background: alpha({}, 0.25);
-                |border-top-right-radius: 5px;
-                |border-bottom-right-radius: 5px;
+                |border-top-right-radius: 8px;
+                |border-bottom-right-radius: 8px;
                 ", self.event.color).trim_margin().as_str(),
                 set_hexpand: true,
 

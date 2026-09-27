@@ -711,6 +711,26 @@ pub fn run_app() -> Result<(), AgwError> {
     info!("Starting topbar service");
     let _ = adw::init().map_err(|err| AgwError::new(1, err.to_string()));
 
+    // Concentric corner-radius scale: for nested components with gap x,
+    // inner radius = outer radius - x. Shells (popover contents, floating
+    // cards) are 20px; cards inset by the 12px container padding get
+    // 20 - 12 = 8px. Priority must sit below relm4's inline_css
+    // (APPLICATION + 1) so per-widget overrides win, but above the
+    // libadwaita theme.
+    let css_provider = gtk::CssProvider::new();
+    css_provider.load_from_string(
+        "popover > contents { border-radius: 20px; padding: 12px; }\n\
+         .card { border-radius: 8px; }\n\
+         .accent-swatch-flow button.toggle { border-radius: 9999px; min-width: 30px; min-height: 30px; padding: 0; border: none; }",
+    );
+    if let Some(display) = gdk::Display::default() {
+        gtk::style_context_add_provider_for_display(
+            &display,
+            &css_provider,
+            gtk::STYLE_PROVIDER_PRIORITY_APPLICATION,
+        );
+    }
+
     info!("Initializing global system state service");
     let global_service = GlobalSystemService::new_instance();
 
