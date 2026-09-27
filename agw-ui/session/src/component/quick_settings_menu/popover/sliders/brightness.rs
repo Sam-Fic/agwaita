@@ -49,7 +49,9 @@ impl Component for BrightnessSlider {
             // Brightness icon wrapped in button for alignment
             gtk::Button {
                 set_has_frame: false,
-                set_sensitive: false,
+                // Not interactive: can_target(false) swallows clicks without
+                // the dimmed rendering that set_sensitive(false) causes.
+                set_can_target: false,
                 model.brightness_icon.widget().clone(),
             },
 

@@ -55,7 +55,6 @@ impl Component for PopoverHeader {
 
             #[wrap(Some)]
             set_start_widget = &gtk::Box {
-                set_margin_start: 8,
                 set_spacing: 8,
                 set_valign: gtk::Align::Center,
 

@@ -198,8 +198,7 @@ impl SimpleComponent for ToggleButtons {
                     set_margin_vertical: 4,
 
                     gtk::Box {
-                        set_margin_horizontal: 4,
-                        set_orientation: gtk::Orientation::Horizontal,
+                                                set_orientation: gtk::Orientation::Horizontal,
                         set_spacing: 8,
 
                         gtk::Image {
@@ -325,8 +324,7 @@ impl SimpleComponent for ToggleButtons {
                     set_margin_vertical: 4,
 
                     gtk::Box {
-                        set_margin_horizontal: 4,
-                        set_orientation: gtk::Orientation::Horizontal,
+                                                set_orientation: gtk::Orientation::Horizontal,
                         set_spacing: 8,
 
                         gtk::Image {

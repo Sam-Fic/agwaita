@@ -551,11 +551,13 @@ impl SystemTrayIcons {
             // Set icon from pixbuf or icon name
             if let Some(ref icon_name) = item.icon_name {
                 let image = gtk::Image::from_icon_name(icon_name);
+                image.set_pixel_size(16);
                 menu_button.set_child(Some(&image));
             } else if let Some(ref pixbuf) = item.icon_pixbuf {
                 #[allow(deprecated)]
                 let texture = gtk::gdk::Texture::for_pixbuf(pixbuf);
                 let image = gtk::Image::from_paintable(Some(&texture));
+                image.set_pixel_size(16);
                 menu_button.set_child(Some(&image));
             } else {
                 warn!(
@@ -563,6 +565,7 @@ impl SystemTrayIcons {
                     item.display_name
                 );
                 let image = gtk::Image::from_icon_name("application-x-executable");
+                image.set_pixel_size(16);
                 menu_button.set_child(Some(&image));
             }
 

@@ -58,6 +58,7 @@ impl SimpleComponent for InfoCenter {
         #[root]
         gtk::MenuButton {
             add_css_class: "flat",
+            add_css_class: "clock-button",
             #[watch]
             set_label: &model.current_time,
 

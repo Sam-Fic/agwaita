@@ -721,7 +721,10 @@ pub fn run_app() -> Result<(), AgwError> {
     css_provider.load_from_string(
         "popover > contents { border-radius: 20px; padding: 12px; }\n\
          .card { border-radius: 8px; }\n\
-         .accent-swatch-flow button.toggle { border-radius: 9999px; min-width: 30px; min-height: 30px; padding: 0; border: none; }",
+         .accent-swatch-flow button.toggle { border-radius: 9999px; min-width: 30px; min-height: 30px; padding: 0; border: none; }\n\
+         /* menus stay compact; only panel popovers use the full 12px padding */\n\
+         popover.menu > contents { padding: 6px 8px; border-radius: 12px; }\n\
+         .clock-button label { font-weight: 700; }",
     );
     if let Some(display) = gdk::Display::default() {
         gtk::style_context_add_provider_for_display(
