@@ -157,7 +157,6 @@ impl SimpleComponent for AppLauncherWindow {
                             inline_css: "
                             |border: none;
                             |border-radius: 12px;
-                            |padding: 8px 12px;
                             ".trim_margin().as_str(),
                             set_placeholder_text: Some("Search applications..."),
                             set_hexpand: true,
