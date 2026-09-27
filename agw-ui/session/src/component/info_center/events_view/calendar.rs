@@ -194,6 +194,11 @@ impl SimpleComponent for Calendar {
                 set_vexpand: true,
                 set_width_request: 320 - 24,
                 set_max_content_height: 320,
+                // 与上方日历网格左右缘对齐:网格 7*38px + 6*2px 间距 = 278px,
+                // 在 296px 内容宽里居中后两侧各剩 9px
+                set_margin_start: 9,
+                set_margin_end: 9,
+                set_margin_top: 8,
 
                 gtk::Box {
                     set_orientation: gtk::Orientation::Vertical,
