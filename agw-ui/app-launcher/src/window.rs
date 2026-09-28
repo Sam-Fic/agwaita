@@ -212,6 +212,23 @@ impl SimpleComponent for AppLauncherWindow {
     fn init(config: Self::Init, root: Self::Root, sender: ComponentSender<Self>) -> ComponentParts<Self> {
         root.init_layer_shell();
 
+        // Favorite stars are toggle buttons, and even flat toggles paint a
+        // checked backdrop disc. Favoriting is conveyed by the filled star
+        // icon alone, so strip that disc. Scoped via a dedicated class so no
+        // other flat circular toggle in the process is affected.
+        let fav_css = gtk::CssProvider::new();
+        fav_css.load_from_string(
+            "button.fav-toggle:checked { background: none; }\
+             button.fav-toggle:checked:hover { background-image: linear-gradient(color-mix(in srgb, white 25%, transparent), color-mix(in srgb, white 25%, transparent)); }",
+        );
+        if let Some(display) = gdk::Display::default() {
+            gtk::style_context_add_provider_for_display(
+                &display,
+                &fav_css,
+                gtk::STYLE_PROVIDER_PRIORITY_APPLICATION + 1,
+            );
+        }
+
         let desktop_entries_service = config.desktop_entries_service.clone();
 
         // Get entries from service
@@ -346,6 +363,11 @@ impl SimpleComponent for AppLauncherWindow {
             // Hidden until the row is hovered or selected (see row_states).
             favorite_button.add_css_class("flat");
             favorite_button.add_css_class("circular");
+            // Neutralize the checked-state backdrop so hover shows the same
+            // shade circle as unfavorited rows (rule in the global provider).
+            favorite_button.add_css_class("star-reveal");
+            // Checked backdrop disc removed via the .fav-toggle rule in init().
+            favorite_button.add_css_class("fav-toggle");
             favorite_button.set_opacity(0.0);
 
             // Star reveal: show when hovered, when the row is selected, or both.
