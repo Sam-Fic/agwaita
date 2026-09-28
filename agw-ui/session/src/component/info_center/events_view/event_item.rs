@@ -76,7 +76,6 @@ impl FactoryComponent for EventItem {
                         set_halign: gtk::Align::Start,
                         set_valign: gtk::Align::Fill,
                         set_ellipsize: gtk::pango::EllipsizeMode::End,
-                        set_margin_bottom : 4,
                         set_visible: !self.event.is_all_day,
 
                         set_label: &format!(
