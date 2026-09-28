@@ -60,6 +60,9 @@ pub struct AppLauncherWindow {
     scrolled_window: gtk::ScrolledWindow,
     /// 空搜索结果时的占位浮层
     empty_label: gtk::Box,
+    /// 每次打开递增；隐藏动画的定时器醒来时若代数已变则静默跳过，
+    /// 避免对已触发的 SourceId 调用 remove()（glib-rs 会 panic）
+    hide_generation: Rc<std::cell::Cell<u64>>,
     favorites_service: Option<Arc<Mutex<Option<FavoritesService>>>>,
     wm_service: Arc<WMService>,
 }
@@ -81,6 +84,57 @@ pub struct AppLauncherWindowConfig {
     pub desktop_entries_service: Arc<Mutex<Option<DesktopEntriesService>>>,
     pub favorites_service: Option<Arc<Mutex<Option<FavoritesService>>>>,
     pub wm_service: Arc<WMService>,
+}
+
+impl AppLauncherWindow {
+    /// Slide the card in from the bottom edge of the screen.
+    ///
+    /// Bumping the generation neutralizes a pending hide timer: when it
+    /// wakes up it sees a mismatched generation and does nothing, so the
+    /// card turns around mid-flight instead of unmapping later.
+    fn show_animated(&mut self) {
+        self.hide_generation.set(self.hide_generation.get() + 1);
+        self.visible = true;
+        self.window.set_visible(true);
+
+        // Skip one frame so the mapped window first computes and paints the
+        // translated style; removing the class on the second tick then starts
+        // the transition from the off-screen position instead of snapping.
+        let callback_window = self.window.clone();
+        let ticks = std::cell::Cell::new(0u8);
+        self.window.add_tick_callback(move |_, _| {
+            ticks.set(ticks.get() + 1);
+            if ticks.get() >= 2 {
+                callback_window.remove_css_class("launcher-hidden");
+                glib::ControlFlow::Break
+            } else {
+                glib::ControlFlow::Continue
+            }
+        });
+    }
+
+    /// Slide the card back down and unmap the layer surface once it is fully
+    /// off-screen. If the card is shown again before the timer fires, the
+    /// generation bump makes the timer a no-op.
+    fn hide_animated(&mut self) {
+        if !self.visible {
+            return;
+        }
+        self.visible = false;
+        let window = self.window.clone();
+        let generation = Rc::clone(&self.hide_generation);
+        let hide_epoch = generation.get() + 1;
+        self.hide_generation.set(hide_epoch);
+        self.window.add_css_class("launcher-hidden");
+        glib::timeout_add_local_once(
+            std::time::Duration::from_millis(170),
+            move || {
+                if generation.get() == hide_epoch {
+                    window.set_visible(false);
+                }
+            },
+        );
+    }
 }
 
 #[relm4::component(pub)]
@@ -137,6 +191,7 @@ impl SimpleComponent for AppLauncherWindow {
 
                 gtk::Box {
                     add_css_class: "card",
+                    add_css_class: "launcher-card",
                     inline_css: "
                     |background-color: @window_bg_color;
                     |border-radius: 20px;
@@ -211,6 +266,31 @@ impl SimpleComponent for AppLauncherWindow {
 
     fn init(config: Self::Init, root: Self::Root, sender: ComponentSender<Self>) -> ComponentParts<Self> {
         root.init_layer_shell();
+
+        // Slide-in stylesheet. The card travels from below the bottom edge of
+        // the screen, so the offset must at least cover the distance from the
+        // card's resting place to the screen bottom; the monitor height is a
+        // safe bound that keeps the card fully off-surface while hidden.
+        let display = gtk4::prelude::RootExt::display(&root);
+        let monitor_height = display
+            .monitors()
+            .item(0)
+            .and_downcast::<gdk::Monitor>()
+            .map(|monitor| monitor.geometry().height())
+            .unwrap_or(1440);
+        let anim_provider = gtk::CssProvider::new();
+        anim_provider.load_from_string(&format!(
+            ".launcher-card {{ transition: transform 220ms cubic-bezier(0.16, 1, 0.3, 1); }}\n\
+             .launcher-hidden .launcher-card {{ transform: translateY({monitor_height}px); transition: transform 150ms cubic-bezier(0.5, 0, 0.75, 0.2); }}"
+        ));
+        gtk::style_context_add_provider_for_display(
+            &display,
+            &anim_provider,
+            gtk::STYLE_PROVIDER_PRIORITY_APPLICATION + 1,
+        );
+        // Hidden is the resting state: the card sits translated off-surface
+        // until the first show removes this class one frame after mapping.
+        root.add_css_class("launcher-hidden");
 
         // Favorite stars are toggle buttons, and even flat toggles paint a
         // checked backdrop disc. Favoriting is conveyed by the filled star
@@ -690,6 +770,7 @@ impl SimpleComponent for AppLauncherWindow {
             selection_model,
             scrolled_window: scrolled_window_ref,
             empty_label,
+            hide_generation: Rc::new(std::cell::Cell::new(0)),
             favorites_service: config.favorites_service,
             wm_service: config.wm_service,
         };
@@ -700,11 +781,13 @@ impl SimpleComponent for AppLauncherWindow {
     fn update(&mut self, msg: Self::Input, _sender: ComponentSender<Self>) {
         match msg {
             AppLauncherWindowInput::Toggle => {
-                self.visible = !self.visible;
-                self.window.set_visible(self.visible);
-                debug!("App launcher toggled: visible={}", self.visible);
-
                 if self.visible {
+                    self.hide_animated();
+                    debug!("App launcher toggled: visible=false");
+                } else {
+                    self.show_animated();
+                    debug!("App launcher toggled: visible=true");
+
                     // Clear search and reset list when showing
                     self.search_entry.set_text("");
                     let entries = if let Some(ref service) = *self.desktop_entries_service.lock().unwrap() {
@@ -719,23 +802,10 @@ impl SimpleComponent for AppLauncherWindow {
 
                     // Focus search entry (keep focus on entry for typing)
                     self.search_entry.grab_focus();
-                } else {
-                    // Clear state when hiding
-                    self.search_entry.set_text("");
-                    let entries = if let Some(ref service) = *self.desktop_entries_service.lock().unwrap() {
-                        service.get_entries()
-                    } else {
-                        Vec::new()
-                    };
-                    self.searcher.set_entries(entries.clone());
-                    self.filtered_apps = entries;
-                    self.update_list_view();
-                    self.selection_model.set_selected(0);
                 }
             },
             AppLauncherWindowInput::Hide => {
-                self.visible = false;
-                self.window.set_visible(false);
+                self.hide_animated();
 
                 // Clear state when hiding
                 self.search_entry.set_text("");
