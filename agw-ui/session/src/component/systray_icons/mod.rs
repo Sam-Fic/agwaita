@@ -547,6 +547,8 @@ impl SystemTrayIcons {
         for item in &self.items {
             let menu_button = gtk::MenuButton::new();
             menu_button.add_css_class("flat");
+            // Square hover footprint (see .tray-button rule in the global CSS).
+            menu_button.add_css_class("tray-button");
 
             // Set icon from pixbuf or icon name
             if let Some(ref icon_name) = item.icon_name {
@@ -554,10 +556,20 @@ impl SystemTrayIcons {
                 image.set_pixel_size(16);
                 menu_button.set_child(Some(&image));
             } else if let Some(ref pixbuf) = item.icon_pixbuf {
+                // set_pixel_size only applies to named icons; a raw pixbuf
+                // would render at its native size (SNI icons are commonly
+                // 32px+) and stretch the square hover footprint. Scale it
+                // down to the same 16px the named icons use.
                 #[allow(deprecated)]
-                let texture = gtk::gdk::Texture::for_pixbuf(pixbuf);
+                let scaled = if pixbuf.width() == 16 && pixbuf.height() == 16 {
+                    None
+                } else {
+                    pixbuf.scale_simple(16, 16, gtk::gdk_pixbuf::InterpType::Bilinear)
+                };
+                let source = scaled.as_ref().unwrap_or(pixbuf);
+                #[allow(deprecated)]
+                let texture = gtk::gdk::Texture::for_pixbuf(source);
                 let image = gtk::Image::from_paintable(Some(&texture));
-                image.set_pixel_size(16);
                 menu_button.set_child(Some(&image));
             } else {
                 warn!(
