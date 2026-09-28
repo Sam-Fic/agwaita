@@ -224,7 +224,7 @@ impl SimpleComponent for ToggleButtons {
                         #[name = "power_saver_button"]
                         gtk::ToggleButton {
                             set_label: "Power Saver",
-                            inline_css: "padding: 6px 8px;",
+                            inline_css: "padding: 6px;",
                             #[watch]
                             set_active: model.power_profile == PowerProfile::PowerSaver,
                         },
@@ -232,7 +232,7 @@ impl SimpleComponent for ToggleButtons {
                         #[name = "balanced_button"]
                         gtk::ToggleButton {
                             set_label: "Balanced",
-                            inline_css: "padding: 6px 8px;",
+                            inline_css: "padding: 6px;",
                             #[watch]
                             set_active: model.power_profile == PowerProfile::Balanced,
                         },
@@ -240,7 +240,7 @@ impl SimpleComponent for ToggleButtons {
                         #[name = "performance_button"]
                         gtk::ToggleButton {
                             set_label: "Performance",
-                            inline_css: "padding: 6px 8px;",
+                            inline_css: "padding: 6px;",
                             #[watch]
                             set_active: model.power_profile == PowerProfile::Performance,
                         },
