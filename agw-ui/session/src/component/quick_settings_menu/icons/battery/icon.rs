@@ -32,6 +32,11 @@ impl Component for BatteryIcon {
         #[root]
         gtk::Box {
             set_spacing: 4,
+            // The header row is 34px tall (the power buttons' height) and the
+            // battery group is vertically centered in it, so its visible top
+            // sits ~7.5px below the popover's 12px padding — call it 20.
+            // Shift right by 8 to give the left inset the same 20px.
+            set_margin_start: 8,
 
             gtk::Image {
                 set_pixel_size: 16,

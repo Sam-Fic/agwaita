@@ -134,9 +134,12 @@ impl SimpleComponent for AvatarIcon {
                 set_overflow: gtk::Overflow::Hidden,
 
 
-                // Avatar image when available
+                // Avatar image when available. Square-requested so the
+                // border-radius: 50% crop is a circle, not an ellipse.
                 gtk::Image {
                     set_pixel_size: 16,
+                    set_width_request: 20,
+                    set_height_request: 20,
 
                     #[watch]
                     set_visible: model.has_avatar,

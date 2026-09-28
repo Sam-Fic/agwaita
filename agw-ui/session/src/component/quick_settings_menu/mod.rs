@@ -5,6 +5,7 @@ use relm4::{
     ComponentController,
     ComponentParts,
     ComponentSender,
+    RelmWidgetExt,
     SimpleComponent,
     adw,
     gtk,
@@ -97,26 +98,97 @@ impl SimpleComponent for QuickSettingsMenu {
         #[root]
         gtk::MenuButton {
             add_css_class: "flat",
+            add_css_class: "qs-button",
             set_direction: gtk::ArrowType::Down,
+            // Fill the 40px topbar so the padding-free button centers its
+            // 26px cells. No end margin: the avatar circle then sits at the
+            // bar's uniform 4px edge margin, symmetric with the left end.
+            set_valign: gtk::Align::Fill,
+            // CenterBox over-allocates its end third; snap back to natural
+            // width so the trailing slack doesn't sit between the last icon
+            // and the bar edge.
+            set_halign: gtk::Align::End,
 
             #[wrap(Some)]
             set_child = &gtk::Box {
                 set_orientation: gtk::Orientation::Horizontal,
-                set_spacing: 8,
+                set_spacing: 4,
 
-                model.brightness_icon.widget(),
-                model.audio_icon.widget(),
-                model.bluetooth_icon.widget(),
-                model.network_icon.widget(),
-                model.dnd_icon.widget(),
-                model.power_mode_icon.widget(),
+                // Square 26px cells keep every icon's allotted area square
+                // (icon 16px centered, matching the tray's 34px cells).
+                // The avatar gets a 20px cell so its circle sits flush.
+                gtk::Box {
+                    set_width_request: 26,
+                    set_height_request: 26,
+                    set_halign: gtk::Align::Center,
+                    set_valign: gtk::Align::Center,
+                    // Outer 10px so the hover plate's left edge clears the
+                    // icon as much as its top edge does.
+                    set_margin_start: 10,
+
+                    model.brightness_icon.widget(),
+                },
+                gtk::Box {
+                    set_width_request: 26,
+                    set_height_request: 26,
+                    set_halign: gtk::Align::Center,
+                    set_valign: gtk::Align::Center,
+
+                    model.audio_icon.widget(),
+                },
+                gtk::Box {
+                    set_width_request: 26,
+                    set_height_request: 26,
+                    set_halign: gtk::Align::Center,
+                    set_valign: gtk::Align::Center,
+
+                    model.bluetooth_icon.widget(),
+                },
+                gtk::Box {
+                    set_width_request: 26,
+                    set_height_request: 26,
+                    set_halign: gtk::Align::Center,
+                    set_valign: gtk::Align::Center,
+
+                    model.network_icon.widget(),
+                },
+                gtk::Box {
+                    set_width_request: 26,
+                    set_height_request: 26,
+                    set_halign: gtk::Align::Center,
+                    set_valign: gtk::Align::Center,
+
+                    model.dnd_icon.widget(),
+                },
+                gtk::Box {
+                    set_width_request: 26,
+                    set_height_request: 26,
+                    set_halign: gtk::Align::Center,
+                    set_valign: gtk::Align::Center,
+
+                    model.power_mode_icon.widget(),
+                },
                 model.battery_icon.widget(),
-                model.avatar_icon.widget(),
+                gtk::Box {
+                    set_width_request: 20,
+                    set_height_request: 20,
+                    set_halign: gtk::Align::Center,
+                    set_valign: gtk::Align::Center,
+                    // Matches the left outer margin of the hover plate.
+                    set_margin_end: 10,
+                    model.avatar_icon.widget(),
+                },
             },
 
             #[wrap(Some)]
             #[name = "popover_widget"]
             set_popover = &gtk::Popover {
+                // The popover hugs the bar window's right edge (its shadow
+                // leaves a 6px visible inset), but GTK parks it lower than
+                // that below the bar. Pull it up so the top gap matches the
+                // right gap at 6px.
+                set_offset: (0, -8),
+
                 adw::Clamp {
                     set_orientation: gtk::Orientation::Horizontal,
                     set_maximum_size: 360,
