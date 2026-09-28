@@ -49,6 +49,8 @@ impl Component for AudioSlider {
             gtk::Button {
                 model.audio_icon.widget().clone(),
 
+                add_css_class: "circular",
+
                 connect_clicked[sender] => move |_| {
                     sender.input(AudioSliderInput::ToggleMute);
                 },
@@ -84,6 +86,8 @@ impl Component for AudioSlider {
             // Settings button to open pavucontrol
             gtk::Button {
                 set_icon_name: "preferences-other-symbolic",
+                add_css_class: "circular",
+
                 connect_clicked => move |_| {
                     let _ = std::process::Command::new("pavucontrol").spawn();
                 },

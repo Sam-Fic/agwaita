@@ -46,9 +46,11 @@ impl Component for BrightnessSlider {
             set_spacing: 8,
             set_hexpand: true,
 
-            // Brightness icon wrapped in button for alignment
+            // Brightness icon wrapped in button for alignment. Circular so it
+            // occupies the same 34px square as the audio row's mute button.
             gtk::Button {
                 set_has_frame: false,
+                add_css_class: "circular",
                 // Not interactive: can_target(false) swallows clicks without
                 // the dimmed rendering that set_sensitive(false) causes.
                 set_can_target: false,
@@ -79,6 +81,7 @@ impl Component for BrightnessSlider {
             // Settings button to open pavucontrol
             gtk::ToggleButton {
                 inline_css: "opacity: 0;",
+                add_css_class: "circular",
 
                 set_icon_name: "preferences-other-symbolic",
             },

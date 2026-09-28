@@ -89,6 +89,7 @@ impl SimpleComponent for Sidebar {
                     gtk::Button {
                         set_icon_name: "preferences-system-symbolic",
                         set_tooltip_text: Some("Adapter Settings"),
+                        add_css_class: "circular",
                         connect_clicked[sender] => move |_| {
                             sender.input(SidebarInput::ShowAdapterSettingsClicked);
                         },
