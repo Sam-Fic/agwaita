@@ -250,11 +250,19 @@ impl SimpleComponent for AppLauncherWindow {
                             set_vexpand: true,
                             set_can_focus: true,
                             set_vscrollbar_policy: gtk::PolicyType::Automatic,
+                            /* The rounded clip must live on the scrolled
+                               window: its bounds are the fixed viewport, so
+                               rows get cut by rounded corners at the visible
+                               top/bottom edges. On the ListView the clip
+                               would travel with the scrolled content. Note
+                               "overflow" is a widget property, not a GTK CSS
+                               property — the CSS declaration would be ignored. */
+                            set_overflow: gtk::Overflow::Hidden,
+                            inline_css: "border-radius: 8px;",
 
                             #[local_ref]
                             app_list_view -> gtk::ListView {
                                 add_css_class: "card",
-                                add_css_class: "frame",
                                 set_can_focus: true,
                             }
                         }
