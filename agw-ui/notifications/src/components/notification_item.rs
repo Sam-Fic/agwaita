@@ -33,10 +33,9 @@ pub fn create_notification_widget(notification: &Notification, store: &Arc<Notif
                 // Header
                 gtk::Box {
                     set_spacing: 8,
-                    set_margin_start: 12,
-                    set_margin_end: 8,
-                    set_margin_top: 8,
-                    set_margin_bottom: 8,
+                    set_margin_all: 8,
+                    set_height_request: 26,
+                    set_valign: gtk::Align::Center,
 
                     #[name = "app_icon"]
                     gtk::Image {
@@ -68,8 +67,10 @@ pub fn create_notification_widget(notification: &Notification, store: &Arc<Notif
                         set_icon_name: "window-close-symbolic",
                         add_css_class: "flat",
                         add_css_class: "circular",
+                        // 26px square: a true circle that fits the compact
+                        // header row (global .circular rule is 34px).
+                        inline_css: "min-width: 26px; min-height: 26px; padding: 0;",
                         set_valign: gtk::Align::Center,
-                        set_height_request: 26,
                     },
                 },
 
@@ -78,9 +79,7 @@ pub fn create_notification_widget(notification: &Notification, store: &Arc<Notif
                 // Body
                 gtk::Box {
                     set_spacing: 8,
-                    set_margin_all: 8,
-                    set_margin_top: 6,
-                    set_margin_horizontal: 12,
+                    set_margin_all: 12,
 
                     #[name = "notification_image"]
                     gtk::Image {
@@ -133,6 +132,7 @@ pub fn create_notification_widget(notification: &Notification, store: &Arc<Notif
                     #[name = "actions_box"]
                     gtk::Box {
                         set_spacing: 8,
+                        set_margin_top: 4,
                         set_margin_horizontal: 12,
                         set_margin_bottom: 12,
                     },
@@ -201,7 +201,8 @@ pub fn create_notification_widget(notification: &Notification, store: &Arc<Notif
         for action in &notification.actions {
             let button = gtk::Button::builder()
                 .label(&action.label)
-                .css_classes(["flat", "pill"])
+                .css_classes(["flat"])
+                .height_request(28)
                 .hexpand(true)
                 .build();
 
@@ -301,10 +302,9 @@ impl RelmListItem for NotificationWithContext {
                     // Header
                     gtk::Box {
                         set_spacing: 8,
-                        set_margin_start: 12,
-                        set_margin_end: 8,
-                        set_margin_top: 8,
-                        set_margin_bottom: 8,
+                        set_margin_all: 8,
+                        set_height_request: 26,
+                        set_valign: gtk::Align::Center,
 
                         #[name = "app_icon"]
                         gtk::Image {
@@ -336,8 +336,10 @@ impl RelmListItem for NotificationWithContext {
                             set_icon_name: "window-close-symbolic",
                             add_css_class: "flat",
                             add_css_class: "circular",
+                            // 26px square: a true circle that fits the compact
+                            // header row (global .circular rule is 34px).
+                            inline_css: "min-width: 26px; min-height: 26px; padding: 0;",
                             set_valign: gtk::Align::Center,
-                            set_height_request: 26,
                         },
                     },
 
@@ -346,18 +348,14 @@ impl RelmListItem for NotificationWithContext {
                     // Body
                     gtk::Box {
                         set_spacing: 8,
-                        set_margin_top: 10,
-                        set_margin_horizontal: 12,
-                        set_margin_bottom: 12,
+                        set_margin_all: 12,
 
                         #[name = "notification_image"]
                         gtk::Image {
                             set_halign: gtk::Align::Center,
                             set_valign: gtk::Align::Start,
                             set_icon_size: gtk::IconSize::Large,
-                            set_margin_top: 4,
-                            set_margin_end: 6,
-                        },
+                                                    },
 
                         gtk::Box {
                             set_orientation: gtk::Orientation::Vertical,
@@ -501,8 +499,9 @@ impl RelmListItem for NotificationWithContext {
                 for action in &self.notification.actions {
                     let button = gtk::Button::builder()
                         .label(&action.label)
+                        .css_classes(["flat"])
+                        .height_request(28)
                         .hexpand(true)
-                        .css_classes(["flat", "pill"])
                         .build();
 
                     // Connect action button to invoke via DBus
