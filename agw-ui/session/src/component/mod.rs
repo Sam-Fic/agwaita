@@ -179,6 +179,10 @@ impl SimpleComponent for TopbarApp {
                 #[wrap(Some)]
                 set_end_widget = &gtk::Box {
                     set_spacing: 4,
+                    // CenterBox over-allocates its end third; snap the tray +
+                    // quick-settings group to its natural width so no slack
+                    // lands between the avatar and the bar edge.
+                    set_halign: gtk::Align::End,
 
                     model.systemd_unit_failed_indicator.widget(),
                     model.privacy_indicator.widget(),
@@ -724,7 +728,35 @@ pub fn run_app() -> Result<(), AgwError> {
          .accent-swatch-flow button.toggle { border-radius: 9999px; min-width: 30px; min-height: 30px; padding: 0; border: none; }\n\
          /* menus stay compact; only panel popovers use the full 12px padding */\n\
          popover.menu > contents { padding: 6px 8px; border-radius: 12px; }\n\
-         .clock-button label { font-weight: 700; }",
+         .clock-button label { font-weight: 700; }\n\
+         /* The theme paints flowboxchild:hover as a rounded RECT one ring\n\
+            larger than the swatch circle — wrong shape for us. Kill the cell\n\
+            background and paint the hover tint inside the round button. */\n\
+         .accent-swatch-flow flowboxchild { background: none; }\n\
+         .accent-swatch-flow button.toggle:hover { background-image: linear-gradient(color-mix(in srgb, white 14%, transparent), color-mix(in srgb, white 14%, transparent)); }\n\
+         /* Theme buttons are 36x26 for a 16px icon (min-width 16 + 2x10 padding\n\
+            vs min-height 24 + 2x5), so circular icons render as ovals. Force\n\
+            circular buttons onto a square 34x34 footprint with centered content. */\n\
+         button.circular { min-width: 34px; min-height: 34px; padding: 0; }\n\
+         /* Tray buttons use the same 26px square cell as the quick-settings
+            cells so every 16px icon in the bar shares one 30px center pitch. */\n\
+         /* MenuButton is a container node; the real button.toggle lives
+            inside it, so these must target the descendant button. */\n\
+         .tray-button > button { min-width: 26px; min-height: 26px; padding: 0; margin: 5px 0; }\n\
+         /* Favorited stars are ToggleButtons in checked state; the theme paints
+            a persistent accent backdrop on them. Keep them bare like unfavorited
+            ones and let hover show the same neutral shade circle. */\n\
+         button.star-reveal:checked { background: none; }\n\
+         button.star-reveal:hover,\n\
+         button.star-reveal:checked:hover { background-image: linear-gradient(color-mix(in srgb, white 25%, transparent), color-mix(in srgb, white 25%, transparent)); }\n\
+         /* Quick-settings icons sit in fixed 26px square cells; the inner\n\
+            button fills the 40px bar with no padding of its own, so the\n\
+            avatar circle sits at the bar's uniform 4px right edge margin\n\
+            and 7px from the top ((40-26)/2 + (26-20)/2). */\n\
+         .qs-button > button { padding: 0; margin: 5px 0; }\n\
+         /* The clock keeps its text padding but must not fill the 40px bar
+            vertically either — same 5px top/bottom inset as the others. */\n\
+         .clock-button > button { margin: 5px 0; }",
     );
     if let Some(display) = gdk::Display::default() {
         gtk::style_context_add_provider_for_display(
