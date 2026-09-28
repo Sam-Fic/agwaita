@@ -33,14 +33,17 @@ pub fn create_notification_widget(notification: &Notification, store: &Arc<Notif
                 // Header
                 gtk::Box {
                     set_spacing: 8,
-                    set_margin_all: 8,
-                    set_height_request: 26,
+                    set_margin_start: 10,
+                    set_margin_end: 10,
+                    set_margin_top: 10,
+                    set_margin_bottom: 6,
+                    set_height_request: 22,
                     set_valign: gtk::Align::Center,
 
                     #[name = "app_icon"]
                     gtk::Image {
                         set_icon_size: gtk::IconSize::Normal,
-                        set_pixel_size: 16,
+                        set_pixel_size: 14,
                         set_valign: gtk::Align::Center,
                     },
 
@@ -69,7 +72,7 @@ pub fn create_notification_widget(notification: &Notification, store: &Arc<Notif
                         add_css_class: "circular",
                         // 26px square: a true circle that fits the compact
                         // header row (global .circular rule is 34px).
-                        inline_css: "min-width: 26px; min-height: 26px; padding: 0;",
+                        inline_css: "min-width: 22px; min-height: 22px; padding: 0;",
                         set_valign: gtk::Align::Center,
                     },
                 },
@@ -302,8 +305,11 @@ impl RelmListItem for NotificationWithContext {
                     // Header
                     gtk::Box {
                         set_spacing: 8,
-                        set_margin_all: 8,
-                        set_height_request: 26,
+                        set_margin_start: 10,
+                        set_margin_end: 10,
+                        set_margin_top: 10,
+                        set_margin_bottom: 6,
+                        set_height_request: 22,
                         set_valign: gtk::Align::Center,
 
                         #[name = "app_icon"]
@@ -338,7 +344,7 @@ impl RelmListItem for NotificationWithContext {
                             add_css_class: "circular",
                             // 26px square: a true circle that fits the compact
                             // header row (global .circular rule is 34px).
-                            inline_css: "min-width: 26px; min-height: 26px; padding: 0;",
+                            inline_css: "min-width: 22px; min-height: 22px; padding: 0;",
                             set_valign: gtk::Align::Center,
                         },
                     },
