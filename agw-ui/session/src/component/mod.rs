@@ -738,11 +738,12 @@ pub fn run_app() -> Result<(), AgwError> {
             vs min-height 24 + 2x5), so circular icons render as ovals. Force\n\
             circular buttons onto a square 34x34 footprint with centered content. */\n\
          button.circular { min-width: 34px; min-height: 34px; padding: 0; }\n\
-         /* Tray buttons use the same 26px square cell as the quick-settings
-            cells so every 16px icon in the bar shares one 30px center pitch. */\n\
+         /* Tray hover plates: the inner button vertically fills the 44px bar
+            (its natural height, set by the clock label) minus the 2x5px
+            margins = 34px, so width must be 34px too for a square plate. */
          /* MenuButton is a container node; the real button.toggle lives
-            inside it, so these must target the descendant button. */\n\
-         .tray-button > button { min-width: 26px; min-height: 26px; padding: 0; margin: 5px 0; }\n\
+            inside it, so these must target the descendant button. */
+         .tray-button > button { min-width: 34px; min-height: 34px; padding: 0; margin: 5px 0; }\n\
          /* Favorited stars are ToggleButtons in checked state; the theme paints
             a persistent accent backdrop on them. Keep them bare like unfavorited
             ones and let hover show the same neutral shade circle. */\n\
