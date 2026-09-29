@@ -183,12 +183,6 @@ impl SimpleComponent for QuickSettingsMenu {
             #[wrap(Some)]
             #[name = "popover_widget"]
             set_popover = &gtk::Popover {
-                // The popover hugs the bar window's right edge (its shadow
-                // leaves a 6px visible inset), but GTK parks it lower than
-                // that below the bar. Pull it up so the top gap matches the
-                // right gap at 6px.
-                set_offset: (0, -8),
-
                 adw::Clamp {
                     set_orientation: gtk::Orientation::Horizontal,
                     set_maximum_size: 360,
