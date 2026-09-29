@@ -12,7 +12,6 @@ pub mod favorites;
 pub mod message;
 pub mod model;
 pub mod search;
-pub mod slide_bin;
 pub mod window;
 
 pub use message::app_launcher_toggle;

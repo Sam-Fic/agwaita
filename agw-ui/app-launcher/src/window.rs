@@ -3,7 +3,10 @@ use crate::{
     favorites::FavoritesService,
     model::DesktopEntry,
     search::AppSearcher,
-    slide_bin::SlideBin,
+};
+use agw_lib_slide_bin::{
+    SlideBin,
+    SlideEdge,
 };
 use agw_service::wm::WMService;
 use catalyser::stdx::extension::{
@@ -339,7 +342,7 @@ impl SimpleComponent for AppLauncherWindow {
     fn init(config: Self::Init, root: Self::Root, sender: ComponentSender<Self>) -> ComponentParts<Self> {
         root.init_layer_shell();
 
-        let slide_bin_widget = SlideBin::new();
+        let slide_bin_widget = SlideBin::new(SlideEdge::Bottom);
 
         // Favorite stars are toggle buttons, and even flat toggles paint a
         // checked backdrop disc. Favoriting is conveyed by the filled star

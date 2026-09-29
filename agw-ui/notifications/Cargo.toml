@@ -8,6 +8,7 @@ repository.workspace = true
 
 [dependencies]
 agw-lib-outcome = { path = "../../agw-lib/outcome" }
+agw-lib-slide-bin = { workspace = true }
 agw-service = { path = "../../agw-service" }
 
 # GTK/UI

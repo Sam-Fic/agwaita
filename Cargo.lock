@@ -38,6 +38,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "agw-lib-slide-bin"
+version = "0.1.0"
+dependencies = [
+ "gtk4",
+ "relm4",
+]
+
+[[package]]
 name = "agw-service"
 version = "0.1.0"
 dependencies = [
@@ -68,6 +76,7 @@ name = "agw-ui-app-launcher"
 version = "0.1.0"
 dependencies = [
  "agw-lib-outcome",
+ "agw-lib-slide-bin",
  "agw-service",
  "catalyser",
  "freedesktop-desktop-entry",
@@ -119,6 +128,7 @@ name = "agw-ui-notifications"
 version = "0.1.0"
 dependencies = [
  "agw-lib-outcome",
+ "agw-lib-slide-bin",
  "agw-service",
  "catalyser",
  "chrono",
@@ -136,6 +146,7 @@ name = "agw-ui-power-menu"
 version = "0.1.0"
 dependencies = [
  "agw-lib-outcome",
+ "agw-lib-slide-bin",
  "catalyser",
  "gtk4",
  "gtk4-layer-shell",

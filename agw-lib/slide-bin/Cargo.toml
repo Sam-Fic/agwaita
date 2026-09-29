@@ -1,0 +1,11 @@
+[package]
+name = "agw-lib-slide-bin"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+gtk4 = { workspace = true }
+relm4 = { workspace = true }

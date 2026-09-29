@@ -129,7 +129,6 @@ pub fn create_notification_widget(notification: &Notification, store: &Arc<Notif
                 // Actions
                 #[name = "actions_scroll"]
                 gtk::ScrolledWindow {
-                    set_vexpand: true,
                     set_hexpand: true,
 
                     #[name = "actions_box"]
@@ -205,7 +204,6 @@ pub fn create_notification_widget(notification: &Notification, store: &Arc<Notif
             let button = gtk::Button::builder()
                 .label(&action.label)
                 .css_classes(["flat"])
-                .height_request(28)
                 .hexpand(true)
                 .build();
 
@@ -399,7 +397,6 @@ impl RelmListItem for NotificationWithContext {
                     // Actions
                     #[name = "actions_scroll"]
                     gtk::ScrolledWindow {
-                        set_vexpand: true,
                         set_hexpand: true,
 
                         #[name = "actions_box"]
@@ -506,7 +503,6 @@ impl RelmListItem for NotificationWithContext {
                     let button = gtk::Button::builder()
                         .label(&action.label)
                         .css_classes(["flat"])
-                        .height_request(28)
                         .hexpand(true)
                         .build();
 
