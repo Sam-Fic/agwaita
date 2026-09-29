@@ -94,9 +94,11 @@ pub struct AppLauncherWindowConfig {
 }
 
 impl AppLauncherWindow {
-    /// Shared slide duration for both directions; only the easing differs
-    /// (ease-out landing on show, ease-in leaving on hide).
-    const SLIDE_DURATION_MS: u32 = 200;
+    /// Slide durations; only the easing differs besides these (ease-out
+    /// landing on show, ease-in leaving on hide). The show is longer so the
+    /// card settles gently, while hide stays snappy.
+    const SHOW_DURATION_MS: u32 = 320;
+    const HIDE_DURATION_MS: u32 = 200;
 
     /// Animate the card between its resting position (progress 1) and fully
     /// below the bottom screen edge (progress 0). AdwAnimation drives the
@@ -114,11 +116,16 @@ impl AppLauncherWindow {
             return;
         }
         let showing = to > from;
+        let duration = if showing {
+            Self::SHOW_DURATION_MS
+        } else {
+            Self::HIDE_DURATION_MS
+        };
         debug!(
             "launcher slide: {:.2} -> {:.2} ({}ms)",
             from,
             to,
-            Self::SLIDE_DURATION_MS
+            duration
         );
         let target = adw::CallbackAnimationTarget::new({
             let slide_bin = self.slide_bin.clone();
@@ -130,7 +137,7 @@ impl AppLauncherWindow {
             &self.slide_bin,
             from,
             to,
-            Self::SLIDE_DURATION_MS,
+            duration,
             target,
         );
         timed.set_easing(if showing {
