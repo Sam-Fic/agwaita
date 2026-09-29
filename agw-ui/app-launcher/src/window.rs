@@ -3,6 +3,7 @@ use crate::{
     favorites::FavoritesService,
     model::DesktopEntry,
     search::AppSearcher,
+    slide_bin::SlideBin,
 };
 use agw_service::wm::WMService;
 use catalyser::stdx::extension::{
@@ -60,9 +61,14 @@ pub struct AppLauncherWindow {
     scrolled_window: gtk::ScrolledWindow,
     /// 空搜索结果时的占位浮层
     empty_label: gtk::Box,
-    /// 每次打开递增；隐藏动画的定时器醒来时若代数已变则静默跳过，
-    /// 避免对已触发的 SourceId 调用 remove()（glib-rs 会 panic）
-    hide_generation: Rc<std::cell::Cell<u64>>,
+    /// 滑动动画的载体：快照时按进度把卡片从屏幕底边外平移到位
+    slide_bin: SlideBin,
+    /// 当前滑动动画；方向切换时 pause 旧动画，从中途进度反向
+    animation: RefCell<Option<adw::Animation>>,
+    /// hide 动画完成后是否需要 unmap 层表面
+    hiding: Rc<std::cell::Cell<bool>>,
+    /// 打开时表面尚未 map（冷启动首次 configure 延迟）则挂起滑入动画
+    slide_pending: std::cell::Cell<bool>,
     favorites_service: Option<Arc<Mutex<Option<FavoritesService>>>>,
     wm_service: Arc<WMService>,
 }
@@ -71,6 +77,7 @@ pub struct AppLauncherWindow {
 pub enum AppLauncherWindowInput {
     Toggle,
     Hide,
+    WindowMapped,
     SearchChanged(String),
     NavigateDown,
     NavigateUp,
@@ -87,53 +94,95 @@ pub struct AppLauncherWindowConfig {
 }
 
 impl AppLauncherWindow {
-    /// Slide the card in from the bottom edge of the screen.
-    ///
-    /// Bumping the generation neutralizes a pending hide timer: when it
-    /// wakes up it sees a mismatched generation and does nothing, so the
-    /// card turns around mid-flight instead of unmapping later.
-    fn show_animated(&mut self) {
-        self.hide_generation.set(self.hide_generation.get() + 1);
-        self.visible = true;
-        self.window.set_visible(true);
+    /// Shared slide duration for both directions; only the easing differs
+    /// (ease-out landing on show, ease-in leaving on hide).
+    const SLIDE_DURATION_MS: u32 = 200;
 
-        // Skip one frame so the mapped window first computes and paints the
-        // translated style; removing the class on the second tick then starts
-        // the transition from the off-screen position instead of snapping.
-        let callback_window = self.window.clone();
-        let ticks = std::cell::Cell::new(0u8);
-        self.window.add_tick_callback(move |_, _| {
-            ticks.set(ticks.get() + 1);
-            if ticks.get() >= 2 {
-                callback_window.remove_css_class("launcher-hidden");
-                glib::ControlFlow::Break
-            } else {
-                glib::ControlFlow::Continue
+    /// Animate the card between its resting position (progress 1) and fully
+    /// below the bottom screen edge (progress 0). AdwAnimation drives the
+    /// SlideBin transform; GtkRevealer was rejected because it snaps on
+    /// freshly remapped layer surfaces (frame-rate readiness gate), while
+    /// AdwAnimation only honors the gtk-enable-animations setting.
+    fn start_slide(&self, to: f64) {
+        if let Some(old) = self.animation.borrow_mut().take() {
+            // Stop without emitting done, so a mid-flight turn-around never
+            // triggers the hide-completed unmap.
+            old.pause();
+        }
+        let from = self.slide_bin.property::<f64>("progress");
+        if (to - from).abs() < f64::EPSILON {
+            return;
+        }
+        let showing = to > from;
+        debug!(
+            "launcher slide: {:.2} -> {:.2} ({}ms)",
+            from,
+            to,
+            Self::SLIDE_DURATION_MS
+        );
+        let target = adw::CallbackAnimationTarget::new({
+            let slide_bin = self.slide_bin.clone();
+            move |value| {
+                slide_bin.set_property("progress", value);
             }
         });
+        let timed = adw::TimedAnimation::new(
+            &self.slide_bin,
+            from,
+            to,
+            Self::SLIDE_DURATION_MS,
+            target,
+        );
+        timed.set_easing(if showing {
+            adw::Easing::EaseOutCubic
+        } else {
+            adw::Easing::EaseInCubic
+        });
+        let anim: adw::Animation = timed.upcast();
+        anim.connect_done({
+            let window = self.window.clone();
+            let hiding = Rc::clone(&self.hiding);
+            move |_| {
+                debug!("launcher slide done");
+                if hiding.get() {
+                    window.set_visible(false);
+                }
+            }
+        });
+        anim.play();
+        self.animation.replace(Some(anim));
     }
 
-    /// Slide the card back down and unmap the layer surface once it is fully
-    /// off-screen. If the card is shown again before the timer fires, the
-    /// generation bump makes the timer a no-op.
+    /// Slide the card in from the bottom edge of the screen.
+    fn show_animated(&mut self) {
+        self.hiding.set(false);
+        self.visible = true;
+        self.window.set_visible(true);
+        if self.slide_bin.is_mapped() {
+            self.start_slide(1.0);
+        } else {
+            // AdwAnimation skips straight to its end value when played on an
+            // unmapped widget, and the first cold-start map waits for the
+            // compositor's layer configure — defer to the map signal.
+            self.slide_pending.set(true);
+        }
+    }
+
+    /// Slide the card back down and unmap the layer surface once the
+    /// animation finishes (connect_done on the animation).
     fn hide_animated(&mut self) {
         if !self.visible {
             return;
         }
         self.visible = false;
-        let window = self.window.clone();
-        let generation = Rc::clone(&self.hide_generation);
-        let hide_epoch = generation.get() + 1;
-        self.hide_generation.set(hide_epoch);
-        self.window.add_css_class("launcher-hidden");
-        glib::timeout_add_local_once(
-            std::time::Duration::from_millis(170),
-            move || {
-                if generation.get() == hide_epoch {
-                    window.set_visible(false);
-                }
-            },
-        );
+        if self.slide_bin.property::<f64>("progress") <= 0.0 {
+            // Nothing to animate: the window is mapped with the card fully
+            // below the screen edge, so unmap right away.
+            self.window.set_visible(false);
+            return;
+        }
+        self.hiding.set(true);
+        self.start_slide(0.0);
     }
 }
 
@@ -153,7 +202,10 @@ impl SimpleComponent for AppLauncherWindow {
             set_anchor: (Edge::Left, true),
             set_anchor: (Edge::Bottom, true),
             set_keyboard_mode: KeyboardMode::Exclusive,
-            inline_css: "background: alpha(var(--window-bg-color), 0.25);",
+            /* The dim lives in the SlideBin's snapshot (semi-transparent
+               black fading with the slide progress); the window itself must
+               paint nothing or the two would stack. */
+            inline_css: "background: transparent;",
             set_visible: false,
 
             add_controller = gtk::EventControllerKey {
@@ -171,11 +223,11 @@ impl SimpleComponent for AppLauncherWindow {
                 connect_released[sender] => move |gesture, _, x, y| {
                     if let Some(widget) = gesture.widget() {
                         if let Some(window) = widget.downcast_ref::<gtk::Window>() {
-                            // Check if click is on the window's transparent background
-                            // by checking if the pick at this position is the window itself
+                            // Check if click is on the window's transparent background:
+                            // the card lives inside the fullscreen slide bin, so a
+                            // click outside it picks either the bin or the window.
                             if let Some(picked) = window.pick(x, y, gtk::PickFlags::DEFAULT) {
-                                // If picked widget is the window, we clicked outside the Clamp
-                                if picked.is::<gtk::Window>() {
+                                if picked.is::<SlideBin>() || picked.is::<gtk::Window>() {
                                     sender.input(AppLauncherWindowInput::Hide);
                                 }
                             }
@@ -184,14 +236,18 @@ impl SimpleComponent for AppLauncherWindow {
                 }
             },
 
-            adw::Clamp {
-                set_maximum_size: 640,
-                set_halign: gtk::Align::Center,
-                set_valign: gtk::Align::Center,
+            #[local_ref]
+            slide_bin_widget -> SlideBin {
+                set_hexpand: true,
+                set_vexpand: true,
 
-                gtk::Box {
-                    add_css_class: "card",
-                    add_css_class: "launcher-card",
+                adw::Clamp {
+                    set_maximum_size: 640,
+                    set_halign: gtk::Align::Center,
+                    set_valign: gtk::Align::Center,
+
+                    gtk::Box {
+                        add_css_class: "card",
                     inline_css: "
                     |background-color: @window_bg_color;
                     |border-radius: 20px;
@@ -268,6 +324,7 @@ impl SimpleComponent for AppLauncherWindow {
                         }
                     }
                 }
+                }
             }
         }
     }
@@ -275,30 +332,7 @@ impl SimpleComponent for AppLauncherWindow {
     fn init(config: Self::Init, root: Self::Root, sender: ComponentSender<Self>) -> ComponentParts<Self> {
         root.init_layer_shell();
 
-        // Slide-in stylesheet. The card travels from below the bottom edge of
-        // the screen, so the offset must at least cover the distance from the
-        // card's resting place to the screen bottom; the monitor height is a
-        // safe bound that keeps the card fully off-surface while hidden.
-        let display = gtk4::prelude::RootExt::display(&root);
-        let monitor_height = display
-            .monitors()
-            .item(0)
-            .and_downcast::<gdk::Monitor>()
-            .map(|monitor| monitor.geometry().height())
-            .unwrap_or(1440);
-        let anim_provider = gtk::CssProvider::new();
-        anim_provider.load_from_string(&format!(
-            ".launcher-card {{ transition: transform 220ms cubic-bezier(0.16, 1, 0.3, 1); }}\n\
-             .launcher-hidden .launcher-card {{ transform: translateY({monitor_height}px); transition: transform 150ms cubic-bezier(0.5, 0, 0.75, 0.2); }}"
-        ));
-        gtk::style_context_add_provider_for_display(
-            &display,
-            &anim_provider,
-            gtk::STYLE_PROVIDER_PRIORITY_APPLICATION + 1,
-        );
-        // Hidden is the resting state: the card sits translated off-surface
-        // until the first show removes this class one frame after mapping.
-        root.add_css_class("launcher-hidden");
+        let slide_bin_widget = SlideBin::new();
 
         // Favorite stars are toggle buttons, and even flat toggles paint a
         // checked backdrop disc. Favoriting is conveyed by the filled star
@@ -730,6 +764,15 @@ impl SimpleComponent for AppLauncherWindow {
         let app_list_view = &list_view;
         let widgets = view_output!();
 
+        // Surface mapping can lag the show request (layer-shell configure on
+        // cold start); the deferred slide resumes here.
+        widgets.slide_bin_widget.connect_map({
+            let sender = sender.input_sender().clone();
+            move |_| {
+                sender.send(AppLauncherWindowInput::WindowMapped).ok();
+            }
+        });
+
         // Store references
         let search_entry_ref = widgets.search_entry.clone();
         let scrolled_window_ref = widgets.scrolled_window.clone();
@@ -778,7 +821,10 @@ impl SimpleComponent for AppLauncherWindow {
             selection_model,
             scrolled_window: scrolled_window_ref,
             empty_label,
-            hide_generation: Rc::new(std::cell::Cell::new(0)),
+            slide_bin: slide_bin_widget.clone(),
+            animation: RefCell::new(None),
+            hiding: Rc::new(std::cell::Cell::new(false)),
+            slide_pending: std::cell::Cell::new(false),
             favorites_service: config.favorites_service,
             wm_service: config.wm_service,
         };
@@ -829,6 +875,11 @@ impl SimpleComponent for AppLauncherWindow {
 
                 debug!("App launcher hidden");
             },
+            AppLauncherWindowInput::WindowMapped => {
+                if self.visible && self.slide_pending.replace(false) {
+                    self.start_slide(1.0);
+                }
+            },
             AppLauncherWindowInput::SearchChanged(query) => {
                 debug!("Search query: {}", query);
 
@@ -858,8 +909,7 @@ impl SimpleComponent for AppLauncherWindow {
                 if let Some(app) = self.filtered_apps.get(idx).cloned() {
                     debug!("Launching app: {}", app.name);
 
-                    self.visible = false;
-                    self.window.set_visible(false);
+                    self.hide_animated();
 
                     // Launch via WMService asynchronously
                     let wm_service = self.wm_service.clone();
