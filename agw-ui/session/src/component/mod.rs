@@ -726,8 +726,14 @@ pub fn run_app() -> Result<(), AgwError> {
         "popover > contents { border-radius: 20px; padding: 12px; }\n\
          .card { border-radius: 8px; }\n\
          .accent-swatch-flow button.toggle { border-radius: 9999px; min-width: 30px; min-height: 30px; padding: 0; border: none; }\n\
-         /* menus stay compact; only panel popovers use the full 12px padding */\n\
-         popover.menu > contents { padding: 6px 8px; border-radius: 12px; }\n\
+         /* menus stay compact; only panel popovers use the full 12px padding.
+            GTK stacks FOUR nesting levels here (contents > stack box > list
+            padding > row), each contributing padding — zero the middle ones
+            so the gap is contents padding alone. The item radius stays at the
+            Adw default (9px); the wrapper derives from it: 9 + 6 = 15px. */
+         popover.menu > contents { padding: 6px; border-radius: 15px; }\n\
+         popover.menu > contents > stack > box, popover.menu > contents > scrolledwindow > viewport > stack > box { padding: 0; }\n\
+         popover.menu contents > list, popover.menu contents > listview, popover.menu scrolledwindow > viewport > list, popover.menu scrolledwindow > listview { padding: 0; }\n\
          .clock-button label { font-weight: 700; }\n\
          /* The theme paints flowboxchild:hover as a rounded RECT one ring\n\
             larger than the swatch circle — wrong shape for us. Kill the cell\n\
