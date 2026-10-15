@@ -1,8 +1,5 @@
 use agw_service::wm::WMService;
-use std::{
-    path::PathBuf,
-    sync::Arc,
-};
+use std::{path::PathBuf, sync::Arc};
 
 /// Desktop application entry
 #[derive(Debug, Clone)]
@@ -29,6 +26,10 @@ pub struct DesktopEntry {
     pub no_display: bool,
     /// Terminal required
     pub terminal: bool,
+    /// Monotonic revision stamped by the scanner when entries are (re)built.
+    /// Lets the launcher detect an unchanged list and skip rebuilding the
+    /// ListStore (and re-binding every row) right when the slide starts.
+    pub rev: u64,
 }
 
 impl DesktopEntry {

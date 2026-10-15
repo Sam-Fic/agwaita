@@ -1,55 +1,23 @@
-use crate::{
-    desktop_entries_service::DesktopEntriesService,
-    favorites::FavoritesService,
-    model::DesktopEntry,
-    search::AppSearcher,
-};
-use agw_lib_slide_bin::{
-    SlideBin,
-    SlideEdge,
-};
+use crate::{desktop_entries_service::DesktopEntriesService, favorites::FavoritesService, model::DesktopEntry, search::AppSearcher};
+use agw_lib_slide_bin::{SlideBin, SlideEdge};
 use agw_service::wm::WMService;
 use catalyser::stdx::extension::{
-    scope_functions_extension::{
-        Apply,
-        TakeIf,
-    },
+    scope_functions_extension::{Apply, TakeIf},
     str_extension::MultilineStr,
 };
-use gtk4::{
-    gdk,
-    glib,
-    prelude::*,
-};
-use gtk4_layer_shell::{
-    Edge,
-    KeyboardMode,
-    Layer,
-    LayerShell,
-};
-use log::{
-    debug,
-    info,
-};
+use gtk4::{gdk, glib, prelude::*};
+use gtk4_layer_shell::{Edge, KeyboardMode, Layer, LayerShell};
+use log::{debug, info};
 use relm4::{
-    ComponentParts,
-    ComponentSender,
-    RelmWidgetExt,
-    SimpleComponent,
-    adw::{
-        self,
-        prelude::*,
-    },
+    ComponentParts, ComponentSender, RelmWidgetExt, SimpleComponent,
+    adw::{self, prelude::*},
     gtk,
 };
 use std::{
     cell::RefCell,
     collections::HashMap,
     rc::Rc,
-    sync::{
-        Arc,
-        Mutex,
-    },
+    sync::{Arc, Mutex},
 };
 
 pub struct AppLauncherWindow {
@@ -70,8 +38,12 @@ pub struct AppLauncherWindow {
     animation: RefCell<Option<adw::Animation>>,
     /// hide 动画完成后是否需要 unmap 层表面
     hiding: Rc<std::cell::Cell<bool>>,
+    /// 输入发送器：show_animated 里把重建列表 + 起滑推迟一拍用
+    self_sender: Arc<Mutex<Option<relm4::Sender<AppLauncherWindowInput>>>>,
     /// 打开时表面尚未 map（冷启动首次 configure 延迟）则挂起滑入动画
     slide_pending: std::cell::Cell<bool>,
+    /// GSettings 收藏是否已合并进扫描结果（见 ensure_favorites_loaded）
+    favorites_loaded: std::cell::Cell<bool>,
     favorites_service: Option<Arc<Mutex<Option<FavoritesService>>>>,
     wm_service: Arc<WMService>,
 }
@@ -81,6 +53,9 @@ pub enum AppLauncherWindowInput {
     Toggle,
     Hide,
     WindowMapped,
+    /// Deferred post-map work: refresh the list and start the slide-in so
+    /// neither lands on the frame that maps the surface.
+    PrepareShown,
     SearchChanged(String),
     NavigateDown,
     NavigateUp,
@@ -124,25 +99,14 @@ impl AppLauncherWindow {
         } else {
             Self::HIDE_DURATION_MS
         };
-        debug!(
-            "launcher slide: {:.2} -> {:.2} ({}ms)",
-            from,
-            to,
-            duration
-        );
+        debug!("launcher slide: {:.2} -> {:.2} ({}ms)", from, to, duration);
         let target = adw::CallbackAnimationTarget::new({
             let slide_bin = self.slide_bin.clone();
             move |value| {
                 slide_bin.set_property("progress", value);
             }
         });
-        let timed = adw::TimedAnimation::new(
-            &self.slide_bin,
-            from,
-            to,
-            duration,
-            target,
-        );
+        let timed = adw::TimedAnimation::new(&self.slide_bin, from, to, duration, target);
         timed.set_easing(if showing {
             adw::Easing::EaseOutCubic
         } else {
@@ -165,15 +129,38 @@ impl AppLauncherWindow {
 
     /// Slide the card in from the bottom edge of the screen.
     fn show_animated(&mut self) {
+        // A slide may still be running when the launcher is reopened
+        // (hide animation not finished). Drop it explicitly: TimedAnimation
+        // holds a strong ref to its target (the SlideBin), which would keep
+        // the old easing curve ticking against the shared "progress"
+        // property and fight the new show animation frame by frame.
+        if let Some(old) = self.animation.borrow_mut().take() {
+            old.pause();
+        }
         self.hiding.set(false);
         self.visible = true;
+        // Map the layer surface FIRST so the compositor can schedule the
+        // first frame, then do the heavy list refresh and start the slide
+        // one frame later. Refreshing before set_visible made the mapped
+        // surface show an empty/stale frame (the visible hitch), and
+        // starting AdwAnimation on a just-mapped surface dropped the
+        // animation's first tick (the stutter).
         self.window.set_visible(true);
         if self.slide_bin.is_mapped() {
-            self.start_slide(1.0);
+            // Warm path: the surface is already mapped, but rebuilding the
+            // list and starting AdwAnimation in this same dispatch would
+            // stall the frame that shows the card. Defer one idle tick so
+            // the compositor gets the map commit first.
+            self.slide_pending.set(true);
+            let sender = Arc::clone(&self.self_sender);
+            glib::idle_add_once(move || {
+                if let Some(s) = sender.lock().unwrap().as_ref() {
+                    s.send(AppLauncherWindowInput::PrepareShown).ok();
+                }
+            });
         } else {
-            // AdwAnimation skips straight to its end value when played on an
-            // unmapped widget, and the first cold-start map waits for the
-            // compositor's layer configure — defer to the map signal.
+            // First cold-start map waits for the compositor's layer
+            // configure — WindowMapped resumes the slide for us.
             self.slide_pending.set(true);
         }
     }
@@ -465,9 +452,8 @@ impl SimpleComponent for AppLauncherWindow {
         let sender_for_setup = sender.clone();
         let selection_model_for_setup = selection_model.clone();
         // 每行的星星按钮状态:悬停或被选中时显示
-        let row_states: std::rc::Rc<
-            std::cell::RefCell<std::collections::HashMap<usize, std::rc::Rc<LauncherRowState>>>,
-        > = std::rc::Rc::new(std::cell::RefCell::new(std::collections::HashMap::new()));
+        let row_states: std::rc::Rc<std::cell::RefCell<std::collections::HashMap<usize, std::rc::Rc<LauncherRowState>>>> =
+            std::rc::Rc::new(std::cell::RefCell::new(std::collections::HashMap::new()));
         {
             let row_states = row_states.clone();
             selection_model.connect_selection_changed(move |model, _, _| {
@@ -704,8 +690,9 @@ impl SimpleComponent for AppLauncherWindow {
                             }
 
                             // 重新绑定行时同步星星可见性(已收藏/选中则常显)
-                            if let Some(state) =
-                                row_states_for_bind.borrow().get(&(list_item.as_ptr() as usize))
+                            if let Some(state) = row_states_for_bind
+                                .borrow()
+                                .get(&(list_item.as_ptr() as usize))
                             {
                                 state.favorited.set(entry.is_favorite);
                                 state.sync_visibility(selection_model_clone.selected());
@@ -775,13 +762,22 @@ impl SimpleComponent for AppLauncherWindow {
         let widgets = view_output!();
 
         // Surface mapping can lag the show request (layer-shell configure on
-        // cold start); the deferred slide resumes here.
-        widgets.slide_bin_widget.connect_map({
+        // cold start); PrepareShown (idle tick) resumes the slide. The
+        // handler disowns itself after its first fire so repeated remaps
+        // don't stack up closures.
+        {
             let sender = sender.input_sender().clone();
-            move |_| {
+            let slide_bin = widgets.slide_bin_widget.clone();
+            let handler_id: Rc<RefCell<Option<glib::SignalHandlerId>>> = Rc::new(RefCell::new(None));
+            let handler_for_closure = Rc::clone(&handler_id);
+            let id = slide_bin.clone().connect_map(move |_| {
                 sender.send(AppLauncherWindowInput::WindowMapped).ok();
-            }
-        });
+                if let Some(id) = handler_for_closure.borrow_mut().take() {
+                    slide_bin.disconnect(id);
+                }
+            });
+            *handler_id.borrow_mut() = Some(id);
+        }
 
         // Store references
         let search_entry_ref = widgets.search_entry.clone();
@@ -815,7 +811,7 @@ impl SimpleComponent for AppLauncherWindow {
         scrolled_window_ref.set_child(Some(&list_overlay));
 
         // Initialize fuzzy searcher with all entries
-        let mut searcher = AppSearcher::new();
+        let searcher = AppSearcher::new();
         searcher.set_entries(entries.clone().apply(|this: &mut Vec<DesktopEntry>| {
             this.sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase()));
         }));
@@ -834,7 +830,9 @@ impl SimpleComponent for AppLauncherWindow {
             slide_bin: slide_bin_widget.clone(),
             animation: RefCell::new(None),
             hiding: Rc::new(std::cell::Cell::new(false)),
+            self_sender: Arc::new(Mutex::new(None)),
             slide_pending: std::cell::Cell::new(false),
+            favorites_loaded: std::cell::Cell::new(false),
             favorites_service: config.favorites_service,
             wm_service: config.wm_service,
         };
@@ -842,7 +840,12 @@ impl SimpleComponent for AppLauncherWindow {
         ComponentParts { model, widgets }
     }
 
-    fn update(&mut self, msg: Self::Input, _sender: ComponentSender<Self>) {
+    fn update(&mut self, msg: Self::Input, sender: ComponentSender<Self>) {
+        // Keep the input sender for the deferred post-map work in
+        // show_animated (stored once; relm4 Sender is Send+Sync).
+        if self.self_sender.lock().unwrap().is_none() {
+            *self.self_sender.lock().unwrap() = Some(sender.input_sender().clone());
+        }
         match msg {
             AppLauncherWindowInput::Toggle => {
                 if self.visible {
@@ -851,43 +854,30 @@ impl SimpleComponent for AppLauncherWindow {
                 } else {
                     self.show_animated();
                     debug!("App launcher toggled: visible=true");
-
-                    // Clear search and reset list when showing
-                    self.search_entry.set_text("");
-                    let entries = if let Some(ref service) = *self.desktop_entries_service.lock().unwrap() {
-                        service.get_entries()
-                    } else {
-                        Vec::new()
-                    };
-                    self.searcher.set_entries(entries.clone());
-                    self.filtered_apps = entries;
-                    self.update_list_view();
-                    self.selection_model.set_selected(0);
-
-                    // Focus search entry (keep focus on entry for typing)
-                    self.search_entry.grab_focus();
                 }
             },
             AppLauncherWindowInput::Hide => {
                 self.hide_animated();
-
-                // Clear state when hiding
-                self.search_entry.set_text("");
-                let entries = if let Some(ref service) = *self.desktop_entries_service.lock().unwrap() {
-                    service.get_entries()
-                } else {
-                    Vec::new()
-                };
-                self.searcher.set_entries(entries.clone());
-                self.filtered_apps = entries;
-                self.update_list_view();
-                self.selection_model.set_selected(0);
-
                 debug!("App launcher hidden");
             },
             AppLauncherWindowInput::WindowMapped => {
+                // Cold start: the surface just finished layer-shell
+                // configure. Defer one idle tick like the warm path so the
+                // map frame lands before the refresh + slide.
+                if self.visible && self.slide_pending.replace(true) {
+                    let sender = Arc::clone(&self.self_sender);
+                    glib::idle_add_once(move || {
+                        if let Some(s) = sender.lock().unwrap().as_ref() {
+                            s.send(AppLauncherWindowInput::PrepareShown).ok();
+                        }
+                    });
+                }
+            },
+            AppLauncherWindowInput::PrepareShown => {
+                // Only act if the launcher is still open and the slide has
+                // not started yet (a fast Hide must not resurrect it).
                 if self.visible && self.slide_pending.replace(false) {
-                    self.start_slide(1.0);
+                    self.reset_and_slide_in();
                 }
             },
             AppLauncherWindowInput::SearchChanged(query) => {
@@ -1004,6 +994,49 @@ impl SimpleComponent for AppLauncherWindow {
 }
 
 impl AppLauncherWindow {
+    /// Merge GSettings favorites into the scanner once; rescanning the whole
+    /// XDG tree is slow, so doing it inline on every open used to stall the
+    /// launcher for hundreds of milliseconds before the first frame.
+    fn ensure_favorites_loaded(&self) {
+        if self.favorites_loaded.replace(true) {
+            return;
+        }
+        let Some(ref favorites_service_arc) = self.favorites_service else {
+            return;
+        };
+        let Ok(guard) = favorites_service_arc.lock() else {
+            return;
+        };
+        let Some(ref service) = *guard else { return };
+        let favorites: Vec<String> = service.get_favorites().into_iter().collect();
+        if let Some(ref de_service) = *self.desktop_entries_service.lock().unwrap() {
+            de_service.set_favorites(favorites);
+        }
+    }
+
+    /// Refresh the app list from the (cached) service and slide the card in.
+    /// Runs one idle tick after the surface maps, so the map frame and the
+    /// first animation ticks are not blocked by list rebuilding.
+    fn reset_and_slide_in(&mut self) {
+        // Clear search and reset list when showing
+        self.search_entry.set_text("");
+        self.ensure_favorites_loaded();
+        let entries = if let Some(ref service) = *self.desktop_entries_service.lock().unwrap() {
+            service.get_entries()
+        } else {
+            Vec::new()
+        };
+        self.searcher.set_entries(entries.clone());
+        self.filtered_apps = entries;
+        self.update_list_view();
+        self.selection_model.set_selected(0);
+
+        // Focus search entry (keep focus on entry for typing)
+        self.search_entry.grab_focus();
+
+        self.start_slide(1.0);
+    }
+
     fn update_list_view(&self) {
         if let Some(model) = self.list_view.model() {
             if let Some(selection) = model.downcast_ref::<gtk::SingleSelection>() {
@@ -1011,6 +1044,18 @@ impl AppLauncherWindow {
                     .model()
                     .and_then(|m| m.downcast::<gtk::gio::ListStore>().ok())
                 {
+                    let unchanged = list_store.n_items() as usize == self.filtered_apps.len()
+                        && list_store
+                            .iter::<glib::BoxedAnyObject>()
+                            .flatten()
+                            .zip(self.filtered_apps.iter())
+                            .all(|(obj, app)| obj.borrow::<DesktopEntry>().rev == app.rev);
+                    if unchanged {
+                        // Same apps in the same order: skip remove_all + N
+                        // appends, which would re-bind every visible row
+                        // right as the slide animation starts.
+                        return;
+                    }
                     list_store.remove_all();
                     for app in self.filtered_apps.iter() {
                         list_store.append(&glib::BoxedAnyObject::new(app.clone()));
@@ -1107,8 +1152,7 @@ struct LauncherRowState {
 
 impl LauncherRowState {
     fn sync_visibility(&self, selected: u32) {
-        let visible =
-            self.hovered.get() || self.favorited.get() || self.item.position() == selected;
+        let visible = self.hovered.get() || self.favorited.get() || self.item.position() == selected;
         self.button.set_opacity(if visible { 1.0 } else { 0.0 });
     }
 }

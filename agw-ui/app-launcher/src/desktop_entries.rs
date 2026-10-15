@@ -1,27 +1,11 @@
 use crate::model::DesktopEntry;
-use freedesktop_desktop_entry::{
-    DesktopEntry as FreedesktopEntry,
-    get_languages_from_env,
-};
-use inotify::{
-    Inotify,
-    WatchMask,
-};
-use log::{
-    debug,
-    warn,
-};
+use freedesktop_desktop_entry::{DesktopEntry as FreedesktopEntry, get_languages_from_env};
+use inotify::{Inotify, WatchMask};
+use log::{debug, warn};
 use std::{
     collections::HashMap,
-    path::{
-        Path,
-        PathBuf,
-    },
-    sync::{
-        Arc,
-        Mutex,
-        RwLock,
-    },
+    path::{Path, PathBuf},
+    sync::{Arc, Mutex, RwLock},
 };
 
 /// Scanner for desktop entries with live reload support
@@ -29,6 +13,9 @@ use std::{
 pub struct DesktopEntryScanner {
     entries: Arc<RwLock<HashMap<String, DesktopEntry>>>,
     favorites: Arc<RwLock<Vec<String>>>,
+    /// Bumped whenever the entry set or favorite flags change; stamped onto
+    /// every entry so consumers can cheaply detect "nothing changed".
+    rev: Arc<std::sync::atomic::AtomicU64>,
     pub(crate) inotify: Arc<Mutex<Option<Inotify>>>,
     watched_paths: Arc<RwLock<Vec<PathBuf>>>,
 }
@@ -38,6 +25,7 @@ impl DesktopEntryScanner {
         Self {
             entries: Arc::new(RwLock::new(HashMap::new())),
             favorites: Arc::new(RwLock::new(Vec::new())),
+            rev: Arc::new(std::sync::atomic::AtomicU64::new(0)),
             inotify: Arc::new(Mutex::new(None)),
             watched_paths: Arc::new(RwLock::new(Vec::new())),
         }
@@ -132,6 +120,7 @@ impl DesktopEntryScanner {
             is_favorite,
             no_display: false,
             terminal,
+            rev: 0,
         }))
     }
 
@@ -169,7 +158,9 @@ impl DesktopEntryScanner {
 
         let mut entries_map = self.entries.write().unwrap();
         entries_map.clear();
-        for entry in all_entries {
+        let rev = self.rev.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
+        for mut entry in all_entries {
+            entry.rev = rev;
             entries_map.insert(entry.id.clone(), entry);
         }
 
@@ -204,9 +195,11 @@ impl DesktopEntryScanner {
 
         let mut entries = self.entries.write().unwrap();
         let favorites_set = self.favorites.read().unwrap();
+        let rev = self.rev.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
 
         for entry in entries.values_mut() {
             entry.is_favorite = favorites_set.contains(&entry.id);
+            entry.rev = rev;
         }
     }
 
