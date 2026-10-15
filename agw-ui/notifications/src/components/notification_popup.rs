@@ -87,16 +87,15 @@ impl SimpleComponent for NotificationPopup {
             set_anchor: (Edge::Top, true),
             set_anchor: (Edge::Right, true),
             set_anchor: (Edge::Bottom, true),
-            inline_css: "
-            |background: linear-gradient(to right, transparent, var(--shade-color));
-            ".trim_margin().as_str(),
+            // Fully transparent: the cards carry their own styling, no
+            // shade layer behind them.
+            inline_css: "background: transparent;",
             set_margin_vertical: 0,
             set_margin_end: 0,
             set_visible: false,
 
             // The cards slide down from the top edge (the popup is anchored
-            // top-right); the window's gradient shade stays static, so the
-            // bin paints no backdrop of its own.
+            // top-right); the bin paints no backdrop dim either.
             #[local_ref]
             slide_bin_widget -> SlideBin {
                 set_hexpand: true,
