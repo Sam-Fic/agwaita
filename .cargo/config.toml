@@ -1,0 +1,14 @@
+# Build environment for agwaita
+#
+# gtk4-layer-shell is built from source and installed under
+# $HOME/.local/lib/x86_64-linux-gnu, which is not in the system linker
+# search path. PKG_CONFIG_PATH lets the *-sys build scripts find its .pc
+# file. The RUNPATH baked in via rustflags makes the binary (and any CLI
+# invocation, e.g. niri `spawn` keybinds that do not inherit a shell
+# profile) locate the shared library at runtime without LD_LIBRARY_PATH.
+
+[env]
+PKG_CONFIG_PATH = "/home/sam/.local/lib/x86_64-linux-gnu/pkgconfig"
+
+[target.x86_64-unknown-linux-gnu]
+rustflags = ["-C", "link-arg=-Wl,-rpath,/home/sam/.local/lib/x86_64-linux-gnu"]
