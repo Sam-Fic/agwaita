@@ -70,7 +70,10 @@ use relm4::{
     Controller,
     RelmWidgetExt,
     SimpleComponent,
-    adw,
+    adw::{
+        self,
+        prelude::*,
+    },
     gtk,
 };
 use std::{
@@ -88,6 +91,7 @@ use std::{
     },
 };
 
+mod bar_reveal_strip;
 mod info_center;
 mod privacy_indicator;
 pub(crate) mod quick_settings_menu;
@@ -108,6 +112,15 @@ pub enum TopbarManagerInput {
     Show,
     Hide,
     Toggle,
+    /// The reveal strip saw the pointer: slide the bar back in.
+    Reveal,
+    /// The pointer entered a revealed bar: cancel any pending auto-hide.
+    BarEntered,
+    /// The pointer left the revealed bar: schedule the auto-hide.
+    BarLeft,
+    /// Fired after the hide timeout; hides unless a popup holds the bar
+    /// open (then it re-arms itself).
+    HideTimeout(u64),
     MonitorAdded(String),
     MonitorRemoved(String),
     RefreshMonitors,
@@ -119,8 +132,22 @@ pub enum TopbarManagerInput {
     Quit,
 }
 
+/// AlwaysVisible keeps the bar pinned as today; AutoHide parks it above the
+/// screen edge and reveals it from the 2px reveal strip.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum BarMode {
+    AlwaysVisible,
+    AutoHide,
+}
+
 struct TopbarManager {
-    visible: bool,
+    mode: BarMode,
+    /// Monotonic counter: hide timers carry the generation they were
+    /// scheduled in and no-op if any reveal/cancel bumped it meanwhile.
+    hide_generation: std::cell::Cell<u64>,
+    slide_animation: std::cell::RefCell<Option<adw::Animation>>,
+    /// 0 = bars at rest, 1 = bars fully parked above the screen edge.
+    hidden_fraction: std::rc::Rc<std::cell::Cell<f64>>,
     topbars: HashMap<String, Controller<TopbarApp>>,
     systray_watcher_started: bool,
     systray_senders: Arc<Mutex<HashMap<String, relm4::Sender<systray_icons::SystemTrayIconsInput>>>>,
@@ -137,6 +164,7 @@ struct TopbarApp {
     privacy_indicator: Controller<PrivacyIndicator>,
     systray_icons: Controller<SystemTrayIcons>,
     quick_settings_menu: Controller<QuickSettingsMenu>,
+    reveal_strip: Controller<bar_reveal_strip::BarRevealStrip>,
 }
 
 #[relm4::component]
@@ -232,6 +260,24 @@ impl SimpleComponent for TopbarApp {
             ))
             .detach();
 
+        let reveal_strip: Controller<bar_reveal_strip::BarRevealStrip> =
+            bar_reveal_strip::BarRevealStrip::builder().launch(monitor.clone()).detach();
+
+        // Pointer tracking for auto-hide: entering the revealed bar cancels
+        // the pending hide, leaving it starts the countdown.
+        let motion = gtk::EventControllerMotion::new();
+        motion.connect_enter(move |_, _, _| {
+            if let Some(sender) = APP_SENDER.get() {
+                sender.send(TopbarManagerInput::BarEntered).ok();
+            }
+        });
+        motion.connect_leave(move |_| {
+            if let Some(sender) = APP_SENDER.get() {
+                sender.send(TopbarManagerInput::BarLeft).ok();
+            }
+        });
+        root.add_controller(motion);
+
         let model = TopbarApp {
             info_center,
             workspaces,
@@ -239,6 +285,7 @@ impl SimpleComponent for TopbarApp {
             privacy_indicator,
             systray_icons,
             quick_settings_menu,
+            reveal_strip,
         };
         let widgets = view_output!();
 
@@ -246,10 +293,151 @@ impl SimpleComponent for TopbarApp {
     }
 }
 
+/// True if `widget` or any descendant is a GtkPopover that is currently
+/// shown. Walks the tree at call time so dynamically created tray menus are
+/// covered too.
+fn widget_has_visible_popover(widget: &gtk::Widget) -> bool {
+    if let Some(popover) = widget.downcast_ref::<gtk::Popover>() {
+        if popover.is_visible() {
+            return true;
+        }
+    }
+    let mut child = widget.first_child();
+    while let Some(current) = child {
+        if widget_has_visible_popover(&current) {
+            return true;
+        }
+        child = current.next_sibling();
+    }
+    false
+}
+
 impl TopbarManager {
+    /// Switch between the pinned and the auto-hide bar. Both directions run
+    /// through the same slide: hiding parks the bars above the screen edge
+    /// (and frees their exclusive zone so windows reclaim the space),
+    /// revealing slides them back and re-reserves it.
+    fn set_mode(&mut self, mode: BarMode) {
+        if self.mode == mode {
+            return;
+        }
+        self.mode = mode;
+        self.hide_generation.set(self.hide_generation.get() + 1);
+        match mode {
+            BarMode::AlwaysVisible => {
+                self.set_strips_visible(false);
+                self.set_zones_reserved(true);
+                self.start_slide(false);
+            },
+            BarMode::AutoHide => {
+                self.set_strips_visible(true);
+                self.set_zones_reserved(false);
+                self.start_slide(true);
+            },
+        }
+    }
+
+    /// Move every bar to `fraction` of its park distance (0 at rest, 1
+    /// fully above the screen edge). Heights are read live so fresh bars
+    /// (height 0 until the compositor configures the surface) pick the
+    /// margin up on their next update.
+    fn apply_slide(&self, fraction: f64) {
+        self.hidden_fraction.set(fraction);
+        for topbar in self.topbars.values() {
+            let widget = topbar.widget();
+            let height = widget.height();
+            if height > 0 {
+                widget.set_margin(Edge::Top, (-height as f64 * fraction).round() as i32);
+            }
+        }
+    }
+
+    fn start_slide(&mut self, to_hidden: bool) {
+        if let Some(old) = self.slide_animation.borrow_mut().take() {
+            // Pause without emitting done, so a mid-flight turn-around never
+            // races the exclusive-zone switch.
+            old.pause();
+        }
+        let from: f64 = if to_hidden { 0.0 } else { 1.0 };
+        let to: f64 = if to_hidden { 1.0 } else { 0.0 };
+        if (to - from).abs() < f64::EPSILON {
+            self.apply_slide(to);
+            return;
+        }
+        let bars: Vec<gtk::Window> = self
+            .topbars
+            .values()
+            .map(|topbar| topbar.widget().clone())
+            .collect();
+        if bars.is_empty() {
+            self.hidden_fraction.set(to);
+            return;
+        }
+        let owner = bars[0].clone();
+        let fraction_cell = std::rc::Rc::clone(&self.hidden_fraction);
+        let target = adw::CallbackAnimationTarget::new(move |fraction| {
+            fraction_cell.set(fraction);
+            for bar in &bars {
+                let height = bar.height();
+                if height > 0 {
+                    bar.set_margin(Edge::Top, (-height as f64 * fraction).round() as i32);
+                }
+            }
+        });
+        let timed = adw::TimedAnimation::new(
+            &owner,
+            from,
+            to,
+            if to_hidden { 220 } else { 260 },
+            target,
+        );
+        timed.set_easing(if to_hidden {
+            adw::Easing::EaseInCubic
+        } else {
+            adw::Easing::EaseOutCubic
+        });
+        let anim: adw::Animation = timed.upcast();
+        anim.play();
+        self.slide_animation.borrow_mut().replace(anim);
+    }
+
+    fn set_strips_visible(&self, visible: bool) {
+        for topbar in self.topbars.values() {
+            topbar
+                .model()
+                .reveal_strip
+                .widget()
+                .set_visible(visible);
+        }
+    }
+
+    /// `auto_exclusive_zone_enable` re-arms the follow-content zone; 0
+    /// releases the space for the windows below.
+    fn set_zones_reserved(&self, reserved: bool) {
+        for topbar in self.topbars.values() {
+            let widget = topbar.widget();
+            if reserved {
+                widget.auto_exclusive_zone_enable();
+            } else {
+                widget.set_exclusive_zone(0);
+            }
+        }
+    }
+
+    /// Any open popover (quick settings, calendar, tray menus) keeps the
+    /// bar from auto-hiding underneath it.
+    fn any_popover_visible(&self) -> bool {
+        self.topbars
+            .values()
+            .any(|topbar| widget_has_visible_popover(topbar.widget().upcast_ref()))
+    }
+
     fn new(global_service: Arc<GlobalSystemService>, main_loop: glib::MainLoop) -> Self {
         TopbarManager {
-            visible: true,
+            mode: BarMode::AlwaysVisible,
+            hide_generation: std::cell::Cell::new(0),
+            slide_animation: std::cell::RefCell::new(None),
+            hidden_fraction: std::rc::Rc::new(std::cell::Cell::new(0.0)),
             topbars: HashMap::new(),
             systray_watcher_started: false,
             systray_senders: Arc::new(Mutex::new(HashMap::new())),
@@ -263,21 +451,65 @@ impl TopbarManager {
     fn handle_message(&mut self, msg: TopbarManagerInput) {
         match msg {
             TopbarManagerInput::Show => {
-                self.visible = true;
-                for topbar in self.topbars.values() {
-                    topbar.widget().set_visible(true);
-                }
+                self.set_mode(BarMode::AlwaysVisible);
             },
             TopbarManagerInput::Hide => {
-                self.visible = false;
-                for topbar in self.topbars.values() {
-                    topbar.widget().set_visible(false);
-                }
+                self.set_mode(BarMode::AutoHide);
             },
             TopbarManagerInput::Toggle => {
-                self.visible = !self.visible;
-                for topbar in self.topbars.values() {
-                    topbar.widget().set_visible(self.visible);
+                let mode = match self.mode {
+                    BarMode::AlwaysVisible => BarMode::AutoHide,
+                    BarMode::AutoHide => BarMode::AlwaysVisible,
+                };
+                self.set_mode(mode);
+            },
+            TopbarManagerInput::Reveal => {
+                self.hide_generation.set(self.hide_generation.get() + 1);
+                if self.mode == BarMode::AutoHide {
+                    // No exclusive zone here on purpose: the revealed bar
+                    // overlays the windows instead of resizing them.
+                    self.start_slide(false);
+                }
+            },
+            TopbarManagerInput::BarEntered => {
+                self.hide_generation.set(self.hide_generation.get() + 1);
+            },
+            TopbarManagerInput::BarLeft => {
+                if self.mode == BarMode::AutoHide {
+                    self.hide_generation.set(self.hide_generation.get() + 1);
+                    let generation = self.hide_generation.get();
+                    if let Some(sender) = APP_SENDER.get() {
+                        let sender = sender.clone();
+                        glib::timeout_add_local_once(
+                            std::time::Duration::from_millis(800),
+                            move || {
+                                let _ = sender.send(TopbarManagerInput::HideTimeout(generation));
+                            },
+                        );
+                    }
+                }
+            },
+            TopbarManagerInput::HideTimeout(generation) => {
+                if self.mode == BarMode::AutoHide && generation == self.hide_generation.get() {
+                    if self.any_popover_visible() {
+                        // A popup holds the bar open; re-check shortly. The
+                        // generation is untouched, so a reveal in between
+                        // still cancels everything.
+                        if let Some(sender) = APP_SENDER.get() {
+                            let sender = sender.clone();
+                            glib::timeout_add_local_once(
+                                std::time::Duration::from_millis(500),
+                                move || {
+                                    let _ = sender
+                                        .send(TopbarManagerInput::HideTimeout(generation));
+                                },
+                            );
+                        }
+                    } else {
+                        // Zone stays 0 in auto-hide mode: the bar overlays
+                        // the windows instead of resizing them.
+                        self.start_slide(true);
+                    }
                 }
             },
             TopbarManagerInput::MonitorAdded(connector) => {
@@ -316,7 +548,30 @@ impl TopbarManager {
                                     ))
                                     .detach();
 
-                                topbar.widget().set_visible(self.visible);
+                                // Bars stay mapped in both modes; in
+                                // auto-hide they start parked above the
+                                // screen edge (margin -height once the
+                                // surface knows its height).
+                                topbar.widget().set_visible(true);
+                                if self.mode == BarMode::AutoHide {
+                                    topbar
+                                        .model()
+                                        .reveal_strip
+                                        .widget()
+                                        .set_visible(true);
+                                    topbar.widget().set_exclusive_zone(0);
+                                    let fraction = std::rc::Rc::clone(&self.hidden_fraction);
+                                    let bar = topbar.widget().clone();
+                                    topbar.widget().connect_map(move |_| {
+                                        let height = bar.height();
+                                        if height > 0 {
+                                            bar.set_margin(
+                                                Edge::Top,
+                                                (-height as f64 * fraction.get()).round() as i32,
+                                            );
+                                        }
+                                    });
+                                }
                                 let systray_sender = topbar.model().systray_icons.sender().clone();
                                 if let Ok(mut senders) = self.systray_senders.lock() {
                                     senders.insert(connector.clone(), systray_sender.clone());
