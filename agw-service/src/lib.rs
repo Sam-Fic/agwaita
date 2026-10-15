@@ -6,6 +6,7 @@
 pub mod accent_color;
 pub mod airplane_mode;
 pub mod audio;
+pub mod bar_mode;
 pub mod battery;
 pub mod bluetooth;
 pub mod brightness;

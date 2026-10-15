@@ -45,6 +45,19 @@ def "main install" [] {
   }
   log info "install..."
   cp -iu $"($build_dir)/($bin_name)" $bin_home
+
+  main install-schemas
+}
+
+# Install the agwaita GSettings schemas into ~/.local/share and compile.
+# Kept out of `init` (which stays a pure cargo+hooks step); the runtime
+# degrades gracefully (warns, no persistence) while these are missing.
+def "main install-schemas" [] {
+  log info "installing gsettings schemas..."
+  let schema_dir = ($env.XDG_DATA_HOME | default $"($env.HOME)/.local/share") + "/glib-2.0/schemas"
+  mkdir $schema_dir
+  cp data/gsettings/*.gschema.xml $schema_dir
+  glib-compile-schemas $schema_dir
 }
 
 # Build `agwaita` into `build/` directory

@@ -1,0 +1,13 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<schemalist>
+  <schema id="com.github.gouvinb.agwaita" path="/com/github/gouvinb/agwaita/">
+    <key name="bar-auto-hide" type="b">
+      <default>false</default>
+      <summary>Auto-hide the top bar</summary>
+      <description>
+        When enabled, the top bar parks above the screen edge and is
+        revealed by touching the top of the display.
+      </description>
+    </key>
+  </schema>
+</schemalist>
