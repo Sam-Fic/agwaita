@@ -49,6 +49,7 @@ pub enum QuickSettingsPopoverInput {
     UpdateBrightness(f64),                        // Forward to brightness slider
     UpdateAirplaneMode(bool),                     // Forward to toggle buttons
     UpdateDarkMode(bool),                         // Forward to toggle buttons
+    UpdateBarAutoHide(bool),                       // Forward to toggle buttons
     UpdateDnd(bool),                              // Forward to toggle buttons
     UpdatePowerProfile(PowerProfile),             // Forward to toggle buttons
     PowerModeServiceReady(Arc<PowerModeService>), // Forward to toggle buttons
@@ -76,6 +77,7 @@ impl std::fmt::Debug for QuickSettingsPopoverInput {
             Self::UpdateBrightness(l) => f.debug_tuple("UpdateBrightness").field(l).finish(),
             Self::UpdateAirplaneMode(v) => f.debug_tuple("UpdateAirplaneMode").field(v).finish(),
             Self::UpdateDarkMode(v) => f.debug_tuple("UpdateDarkMode").field(v).finish(),
+            Self::UpdateBarAutoHide(v) => f.debug_tuple("UpdateBarAutoHide").field(v).finish(),
             Self::UpdateDnd(v) => f.debug_tuple("UpdateDnd").field(v).finish(),
             Self::UpdatePowerProfile(p) => f.debug_tuple("UpdatePowerProfile").field(p).finish(),
             Self::PowerModeServiceReady(_) => write!(f, "PowerModeServiceReady(...)"),
@@ -197,6 +199,10 @@ impl Component for QuickSettingsPopover {
             QuickSettingsPopoverInput::UpdateDarkMode(enabled) => {
                 self.toggle_buttons
                     .emit(ToggleButtonsInput::UpdateDarkMode(enabled));
+            },
+            QuickSettingsPopoverInput::UpdateBarAutoHide(enabled) => {
+                self.toggle_buttons
+                    .emit(ToggleButtonsInput::UpdateBarAutoHide(enabled));
             },
             QuickSettingsPopoverInput::UpdateDnd(enabled) => {
                 self.toggle_buttons

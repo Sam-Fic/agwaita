@@ -341,6 +341,20 @@ impl SimpleComponent for QuickSettingsMenu {
                     self.popover
                         .emit(QuickSettingsPopoverInput::UpdateDarkMode(enabled));
                 },
+                SystemStateUpdate::BarAutoHide(enabled) => {
+                    // Keep the control-center switch in sync with the
+                    // persisted preference...
+                    self.popover
+                        .emit(QuickSettingsPopoverInput::UpdateBarAutoHide(enabled));
+                    // ...and tell the manager, which owns the actual bar
+                    // mode. Sent via APP_SENDER so no per-bar plumbing is
+                    // needed.
+                    if let Some(sender) = crate::APP_SENDER.get() {
+                        sender
+                            .send(crate::component::TopbarManagerInput::SetBarMode(enabled))
+                            .ok();
+                    }
+                },
                 SystemStateUpdate::AirplaneMode(_enabled) => {
                     // Airplane mode state - forward to popover toggle
                     self.popover

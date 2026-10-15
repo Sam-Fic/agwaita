@@ -7,6 +7,7 @@ use agw_service::{
         AccentColorService,
     },
     airplane_mode::AirplaneModeService,
+    bar_mode::BarModeService,
     dark_mode::DarkModeService,
     power_mode::PowerProfile,
 };
@@ -32,10 +33,12 @@ use std::{
 /// Row 2: [DarkMode] [AccentColor]
 ///        AccentColor Revealer (spans 2 columns)
 /// Row 3: [DoNotDisturb] [Bluetooth]
+/// Row 4: [AutoHideBar]
 pub struct ToggleButtons {
     airplane_mode_service: Option<Arc<AirplaneModeService>>,
     airplane_mode_enabled: bool,
     dark_mode_enabled: bool,
+    bar_auto_hide_enabled: bool,
     dnd_service: DndToggleService,
     dnd_enabled: bool,
     power_mode_expanded: bool,
@@ -62,6 +65,7 @@ impl ToggleButtons {
 pub enum ToggleButtonsInput {
     ToggleAirplaneMode,
     ToggleDarkMode,
+    ToggleBarAutoHide,
     ToggleDnd,
     TogglePowerModeRevealer,
     SelectPowerProfile(power_mode::PowerProfile),
@@ -69,6 +73,7 @@ pub enum ToggleButtonsInput {
     SelectAccentColor(AccentColor),
     UpdateAirplaneMode(bool),
     UpdateDarkMode(bool),
+    UpdateBarAutoHide(bool),
     UpdateDnd(bool),
     UpdatePowerProfile(power_mode::PowerProfile),
     UpdateAccentColor(AccentColor),
@@ -82,6 +87,7 @@ impl std::fmt::Debug for ToggleButtonsInput {
         match self {
             Self::ToggleAirplaneMode => write!(f, "ToggleAirplaneMode"),
             Self::ToggleDarkMode => write!(f, "ToggleDarkMode"),
+            Self::ToggleBarAutoHide => write!(f, "ToggleBarAutoHide"),
             Self::ToggleDnd => write!(f, "ToggleDnd"),
             Self::TogglePowerModeRevealer => write!(f, "TogglePowerModeRevealer"),
             Self::SelectPowerProfile(p) => write!(f, "SelectPowerProfile({:?})", p),
@@ -89,6 +95,7 @@ impl std::fmt::Debug for ToggleButtonsInput {
             Self::SelectAccentColor(c) => write!(f, "SelectAccentColor({:?})", c),
             Self::UpdateAirplaneMode(v) => write!(f, "UpdateAirplaneMode({})", v),
             Self::UpdateDarkMode(v) => write!(f, "UpdateDarkMode({})", v),
+            Self::UpdateBarAutoHide(v) => write!(f, "UpdateBarAutoHide({})", v),
             Self::UpdateDnd(v) => write!(f, "UpdateDnd({})", v),
             Self::UpdatePowerProfile(p) => write!(f, "UpdatePowerProfile({:?})", p),
             Self::UpdateAccentColor(c) => write!(f, "UpdateAccentColor({:?})", c),
@@ -505,6 +512,38 @@ impl SimpleComponent for ToggleButtons {
                     }
                 },
             },
+
+            // Row 4: Auto-hide top bar, styled as the other toggle tiles
+            // (same ToggleButton chrome; the switch semantics live in the
+            // state, mirrored live from GSettings via UpdateBarAutoHide).
+            gtk::Box {
+                set_orientation: gtk::Orientation::Horizontal,
+                set_spacing: 8,
+                set_homogeneous: true,
+                set_margin_top: 4,
+
+                #[name = "bar_auto_hide_button"]
+                gtk::ToggleButton {
+                    set_hexpand: true,
+
+                    #[watch]
+                    set_active: model.bar_auto_hide_enabled,
+
+                    gtk::Box {
+                        set_orientation: gtk::Orientation::Horizontal,
+                        set_spacing: 8,
+                        // Single static icon: the active/inactive tint of
+                        // the tile already conveys the state, and there is
+                        // no reliable "hidden bar" symbolic in the theme.
+                        gtk::Image {
+                            set_icon_name: Some("view-reveal-symbolic"),
+                        },
+                        gtk::Label {
+                            set_label: "Auto-hide Top Bar",
+                        }
+                    }
+                },
+            },
         }
     }
 
@@ -533,6 +572,7 @@ impl SimpleComponent for ToggleButtons {
             airplane_mode_service,
             airplane_mode_enabled,
             dark_mode_enabled: DarkModeService::is_enabled(),
+            bar_auto_hide_enabled: BarModeService::is_auto_hide(false),
             dnd_service,
             dnd_enabled,
             power_mode_expanded: false,
@@ -593,6 +633,16 @@ impl SimpleComponent for ToggleButtons {
         let sender_clone = sender.input_sender().clone();
         widgets.dnd_button.connect_clicked(move |_| {
             sender_clone.send(ToggleButtonsInput::ToggleDnd).ok();
+        });
+
+        let sender_clone = sender.input_sender().clone();
+        widgets.bar_auto_hide_button.connect_clicked(move |_| {
+            // The tile is #[watch]-bound to the service-backed model state,
+            // so just request the toggle; the resulting GSettings change
+            // event updates every consumer, including this button.
+            sender_clone
+                .send(ToggleButtonsInput::ToggleBarAutoHide)
+                .ok();
         });
 
         let sender_clone = sender.input_sender().clone();
@@ -737,6 +787,15 @@ impl SimpleComponent for ToggleButtons {
                 }
                 self.dark_mode_enabled = DarkModeService::is_enabled();
             },
+            ToggleButtonsInput::ToggleBarAutoHide => {
+                if let Err(e) = BarModeService::toggle() {
+                    log::error!("Failed to toggle bar auto-hide: {}", e);
+                    // Re-sync the switch with the unchanged persisted value.
+                    self.bar_auto_hide_enabled = BarModeService::is_auto_hide(self.bar_auto_hide_enabled);
+                    return;
+                }
+                self.bar_auto_hide_enabled = BarModeService::is_auto_hide(self.bar_auto_hide_enabled);
+            },
             ToggleButtonsInput::ToggleDnd => {
                 self.dnd_service.toggle();
                 self.dnd_enabled = self.dnd_service.is_enabled();
@@ -781,6 +840,9 @@ impl SimpleComponent for ToggleButtons {
             },
             ToggleButtonsInput::UpdateDarkMode(enabled) => {
                 self.dark_mode_enabled = enabled;
+            },
+            ToggleButtonsInput::UpdateBarAutoHide(enabled) => {
+                self.bar_auto_hide_enabled = enabled;
             },
             ToggleButtonsInput::UpdateDnd(enabled) => {
                 self.dnd_enabled = enabled;
