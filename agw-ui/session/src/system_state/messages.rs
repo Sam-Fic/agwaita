@@ -33,6 +33,9 @@ pub enum SystemStateUpdate {
     /// Dark mode state changed
     DarkMode(bool),
 
+    /// Topbar auto-hide preference changed (control-center switch)
+    BarAutoHide(bool),
+
     /// Airplane mode state changed
     AirplaneMode(bool),
 
@@ -67,6 +70,7 @@ impl std::fmt::Debug for SystemStateUpdate {
             Self::Network(t, c, s) => f.debug_tuple("Network").field(t).field(c).field(s).finish(),
             Self::Dnd(v) => f.debug_tuple("Dnd").field(v).finish(),
             Self::DarkMode(v) => f.debug_tuple("DarkMode").field(v).finish(),
+            Self::BarAutoHide(v) => f.debug_tuple("BarAutoHide").field(v).finish(),
             Self::AirplaneMode(v) => f.debug_tuple("AirplaneMode").field(v).finish(),
             Self::PowerProfile(p) => f.debug_tuple("PowerProfile").field(p).finish(),
             Self::Battery(p, c, pr) => f

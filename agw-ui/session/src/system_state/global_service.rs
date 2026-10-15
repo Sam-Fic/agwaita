@@ -20,6 +20,10 @@ use agw_service::{
         AirplaneModeService,
     },
     battery::BatteryService,
+    bar_mode::{
+        BarModeMonitor,
+        BarModeService,
+    },
     bluetooth::{
         BluetoothMonitor,
         BluetoothService,
@@ -93,6 +97,7 @@ pub struct GlobalSystemService {
 
     accent_color_monitor: Arc<Mutex<Option<AccentColorMonitor>>>,
     dark_mode_monitor: Arc<Mutex<Option<DarkModeMonitor>>>,
+    bar_mode_monitor: Arc<Mutex<Option<BarModeMonitor>>>,
 
     privacy_service: Arc<agw_service::privacy::PrivacyService>,
     privacy_service_adapter: Arc<Mutex<Option<PrivacyServiceAdapter>>>,
@@ -217,6 +222,7 @@ impl GlobalSystemService {
             battery_service,
             accent_color_monitor: Arc::new(Mutex::new(None)),
             dark_mode_monitor: Arc::new(Mutex::new(None)),
+            bar_mode_monitor: Arc::new(Mutex::new(None)),
             privacy_service,
             privacy_service_adapter: Arc::new(Mutex::new(None)),
             systemd_failed_service,
@@ -284,6 +290,9 @@ impl GlobalSystemService {
 
         let dark_mode_enabled = DarkModeService::is_enabled();
         let _ = sender.send(SystemStateUpdate::DarkMode(dark_mode_enabled));
+
+        let bar_auto_hide = BarModeService::is_auto_hide(false);
+        let _ = sender.send(SystemStateUpdate::BarAutoHide(bar_auto_hide));
 
         let airplane_mode_enabled = self.airplane_mode_service.is_enabled();
         let _ = sender.send(SystemStateUpdate::AirplaneMode(airplane_mode_enabled));
@@ -355,6 +364,9 @@ impl GlobalSystemService {
 
         // Setup dark mode monitor
         self.setup_dark_mode_monitor();
+
+        // Setup bar auto-hide preference monitor
+        self.setup_bar_mode_monitor();
 
         // Setup privacy monitor
         self.setup_privacy_monitor();
@@ -617,6 +629,21 @@ impl GlobalSystemService {
         });
 
         *dark_mode_monitor_ref.lock().unwrap() = monitor;
+    }
+
+    fn setup_bar_mode_monitor(&self) {
+        let subscribers = self.subscribers.clone();
+        let bar_mode_monitor_ref = self.bar_mode_monitor.clone();
+
+        let monitor = BarModeService::monitor_bar_mode(move |enabled| {
+            debug!("Bar auto-hide changed: enabled={}", enabled);
+            let update = SystemStateUpdate::BarAutoHide(enabled);
+
+            let mut subs = subscribers.lock().unwrap();
+            subs.retain(|sender| sender.send(update.clone()).is_ok());
+        });
+
+        *bar_mode_monitor_ref.lock().unwrap() = monitor;
     }
     fn setup_privacy_monitor(&self) {
         let subscribers = self.subscribers.clone();

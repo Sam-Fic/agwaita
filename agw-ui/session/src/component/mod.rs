@@ -17,6 +17,7 @@ use crate::{
 };
 use agw_lib_outcome::error::AgwError;
 use agw_service::{
+    bar_mode::BarModeService,
     power_mode::PowerModeService,
     runtime,
 };
@@ -121,6 +122,9 @@ pub enum TopbarManagerInput {
     /// Fired after the hide timeout; hides unless a popup holds the bar
     /// open (then it re-arms itself).
     HideTimeout(u64),
+    /// The persisted auto-hide preference changed (control-center switch or
+    /// any other GSettings client).
+    SetBarMode(bool),
     MonitorAdded(String),
     MonitorRemoved(String),
     RefreshMonitors,
@@ -138,6 +142,16 @@ pub enum TopbarManagerInput {
 pub(crate) enum BarMode {
     AlwaysVisible,
     AutoHide,
+}
+
+impl BarMode {
+    fn from_auto_hide(enabled: bool) -> Self {
+        if enabled {
+            BarMode::AutoHide
+        } else {
+            BarMode::AlwaysVisible
+        }
+    }
 }
 
 struct TopbarManager {
@@ -322,8 +336,26 @@ impl TopbarManager {
             return;
         }
         self.mode = mode;
+        // Route through the persisted preference so every entry point
+        // (control-center switch, CLI, startup) lands on the same GSettings
+        // write. The global-service watcher re-applies it idempotently via
+        // SetBarMode, where the equality check above short-circuits.
+        let result = if mode == BarMode::AutoHide {
+            BarModeService::enable()
+        } else {
+            BarModeService::disable()
+        };
+        if let Err(e) = result {
+            log::error!("Failed to persist bar mode: {e}");
+        }
+        self.apply_mode();
+    }
+
+    /// Push self.mode onto the bars. Idempotent: safe to call from both the
+    /// local toggle and the GSettings change watcher.
+    fn apply_mode(&mut self) {
         self.hide_generation.set(self.hide_generation.get() + 1);
-        match mode {
+        match self.mode {
             BarMode::AlwaysVisible => {
                 self.set_strips_visible(false);
                 self.set_zones_reserved(true);
@@ -335,6 +367,16 @@ impl TopbarManager {
                 self.start_slide(true);
             },
         }
+    }
+
+    /// Adopt a mode coming from outside (initial preference read, or a
+    /// change event while another client rewrote it).
+    fn set_mode_external(&mut self, mode: BarMode) {
+        if self.mode == mode {
+            return;
+        }
+        self.mode = mode;
+        self.apply_mode();
     }
 
     /// Move every bar to `fraction` of its park distance (0 at rest, 1
@@ -434,7 +476,11 @@ impl TopbarManager {
 
     fn new(global_service: Arc<GlobalSystemService>, main_loop: glib::MainLoop) -> Self {
         TopbarManager {
-            mode: BarMode::AlwaysVisible,
+            // Restore the persisted preference; bars created later pick the
+            // mode up in MonitorAdded, and the first SetBarMode event (from
+            // the global service's initial broadcast) applies it to any
+            // bars that already exist.
+            mode: BarMode::from_auto_hide(BarModeService::is_auto_hide(false)),
             hide_generation: std::cell::Cell::new(0),
             slide_animation: std::cell::RefCell::new(None),
             hidden_fraction: std::rc::Rc::new(std::cell::Cell::new(0.0)),
@@ -511,6 +557,12 @@ impl TopbarManager {
                         self.start_slide(true);
                     }
                 }
+            },
+            TopbarManagerInput::SetBarMode(enabled) => {
+                // From the global service's GSettings watcher: either the
+                // control-center switch flipped on another component, or a
+                // local set_mode() round-trips back here (no-op).
+                self.set_mode_external(BarMode::from_auto_hide(enabled));
             },
             TopbarManagerInput::MonitorAdded(connector) => {
                 debug!("Creating topbar for monitor: {}", connector);
