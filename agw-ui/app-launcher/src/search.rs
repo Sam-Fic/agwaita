@@ -55,6 +55,32 @@ impl AppSearcher {
             .collect();
 
         let mut seen_ids: HashSet<&str> = HashSet::new();
+        let mut results = Vec::new();
+
+        // Name matches are ranked by match quality — exact > prefix >
+        // word-start > contains — so typing "setting" puts "Settings"
+        // above "Qt6 Settings" even though the latter sorts earlier.
+        {
+            let mut named: Vec<Candidate> = candidates
+                .iter()
+                .filter(|c| {
+                    c.name_norm.contains(&query_normalized)
+                        && seen_ids.insert(c.entry.id.as_str())
+                })
+                .cloned()
+                .collect();
+            named.sort_by(|a, b| {
+                name_tier(&a.name_norm, &query_normalized)
+                    .cmp(&name_tier(&b.name_norm, &query_normalized))
+                    .then(
+                        b.entry
+                            .is_favorite
+                            .cmp(&a.entry.is_favorite),
+                    )
+                    .then(a.name_norm.cmp(&b.name_norm))
+            });
+            results.extend(named.into_iter().map(|c| c.entry));
+        }
 
         let mut collect = |pred: &dyn Fn(&Candidate) -> bool| -> Vec<DesktopEntry> {
             let mut list: Vec<Candidate> = candidates
@@ -62,12 +88,17 @@ impl AppSearcher {
                 .filter(|c| pred(c) && seen_ids.insert(c.entry.id.as_str()))
                 .cloned()
                 .collect();
-            list.sort_by(|a, b| a.name_norm.cmp(&b.name_norm));
+            // Favorites break ties within a bucket, but never above a
+            // better-matching field.
+            list.sort_by(|a, b| {
+                b.entry
+                    .is_favorite
+                    .cmp(&a.entry.is_favorite)
+                    .then(a.name_norm.cmp(&b.name_norm))
+            });
             list.into_iter().map(|c| c.entry).collect()
         };
 
-        let mut results = Vec::new();
-        results.extend(collect(&|c| c.name_norm.contains(&query_normalized)));
         results.extend(collect(&|c| {
             c.generic_norm
                 .as_ref()
@@ -84,13 +115,6 @@ impl AppSearcher {
                 .is_some_and(|s| s.contains(&query_normalized))
         }));
 
-        // Stable partition favorites first (no per-compare allocation).
-        results.sort_by(|a, b| match (a.is_favorite, b.is_favorite) {
-            (true, false) => std::cmp::Ordering::Less,
-            (false, true) => std::cmp::Ordering::Greater,
-            _ => std::cmp::Ordering::Equal,
-        });
-
         results
     }
 
@@ -100,6 +124,21 @@ impl AppSearcher {
             .chars()
             .map(|c| normalize(c))
             .collect::<String>()
+    }
+}
+
+/// Match-quality tier of a normalized name against a normalized query:
+/// 0 = exact, 1 = prefix, 2 = word-start, 3 = contains anywhere.
+/// Only called for names that already contain the query.
+fn name_tier(name_norm: &str, query: &str) -> u8 {
+    if name_norm == query {
+        0
+    } else if name_norm.starts_with(query) {
+        1
+    } else if name_norm.split_whitespace().any(|w| w.starts_with(query)) {
+        2
+    } else {
+        3
     }
 }
 
