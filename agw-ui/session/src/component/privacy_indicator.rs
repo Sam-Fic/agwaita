@@ -19,6 +19,10 @@ pub enum PrivacyIndicatorInput {
 
 pub struct PrivacyIndicator {
     usage: PrivacyUsage,
+    /// Precomputed tooltip so `#[watch]` never rebuilds the markup — only
+    /// genuine privacy changes (the only messages that reach `update`)
+    /// recompute it.
+    tooltip_markup: String,
 }
 
 #[relm4::component(pub)]
@@ -38,7 +42,7 @@ impl SimpleComponent for PrivacyIndicator {
             set_spacing: 8,
 
             #[watch]
-            set_tooltip_markup: Some(&model.usage_to_tooltip_markup()),
+            set_tooltip_markup: Some(&model.tooltip_markup),
             #[watch]
             set_visible: !model.usage_is_empty(),
 
@@ -75,14 +79,21 @@ impl SimpleComponent for PrivacyIndicator {
     fn init(system_state_receiver: Self::Init, root: Self::Root, sender: ComponentSender<Self>) -> ComponentParts<Self> {
         let model = PrivacyIndicator {
             usage: PrivacyUsage::default(),
+            tooltip_markup: String::new(),
         };
 
         let input_sender = sender.input_sender().clone();
         std::thread::spawn(move || {
             while let Ok(update) = system_state_receiver.recv() {
-                input_sender
-                    .send(PrivacyIndicatorInput::SystemStateUpdate(update))
-                    .ok();
+                // Only privacy updates matter to this component: forwarding
+                // every broadcast (battery, audio, network, ...) needlessly
+                // re-ran every `#[watch]` and rebuilt the tooltip on the
+                // GTK main thread several times per minute.
+                if let SystemStateUpdate::Privacy(usage) = update {
+                    input_sender
+                        .send(PrivacyIndicatorInput::SystemStateUpdate(SystemStateUpdate::Privacy(usage)))
+                        .ok();
+                }
             }
         });
 
@@ -91,11 +102,9 @@ impl SimpleComponent for PrivacyIndicator {
     }
 
     fn update(&mut self, message: Self::Input, _sender: ComponentSender<Self>) {
-        match message {
-            PrivacyIndicatorInput::SystemStateUpdate(SystemStateUpdate::Privacy(usage)) => {
-                self.usage = usage;
-            },
-            _ => {},
+        if let PrivacyIndicatorInput::SystemStateUpdate(SystemStateUpdate::Privacy(usage)) = message {
+            self.tooltip_markup = Self::usage_to_tooltip_markup(&usage);
+            self.usage = usage;
         }
     }
 }
@@ -105,26 +114,26 @@ impl PrivacyIndicator {
         self.usage.camera.is_empty() && self.usage.microphone.is_empty() && self.usage.location.is_empty() && self.usage.screencast.is_empty()
     }
 
-    fn usage_to_tooltip_markup(&self) -> String {
+    fn usage_to_tooltip_markup(usage: &PrivacyUsage) -> String {
         let mut lines = Vec::new();
 
-        if !self.usage.microphone.is_empty() {
-            let mut apps: Vec<_> = self.usage.microphone.iter().cloned().collect();
+        if !usage.microphone.is_empty() {
+            let mut apps: Vec<_> = usage.microphone.iter().cloned().collect();
             apps.sort_unstable();
             lines.push(format!("<b>Microphone:</b>\n{}", apps.join("\n")));
         }
-        if !self.usage.camera.is_empty() {
-            let mut apps: Vec<_> = self.usage.camera.iter().cloned().collect();
+        if !usage.camera.is_empty() {
+            let mut apps: Vec<_> = usage.camera.iter().cloned().collect();
             apps.sort_unstable();
             lines.push(format!("<b>Camera:</b>\n{}", apps.join("\n")));
         }
-        if !self.usage.location.is_empty() {
-            let mut apps: Vec<_> = self.usage.location.iter().cloned().collect();
+        if !usage.location.is_empty() {
+            let mut apps: Vec<_> = usage.location.iter().cloned().collect();
             apps.sort_unstable();
             lines.push(format!("<b>Location:</b>\n{}", apps.join("\n")));
         }
-        if !self.usage.screencast.is_empty() {
-            let mut apps: Vec<_> = self.usage.screencast.iter().cloned().collect();
+        if !usage.screencast.is_empty() {
+            let mut apps: Vec<_> = usage.screencast.iter().cloned().collect();
             apps.sort_unstable();
             lines.push(format!("<b>Screen sharing:</b>\n{}", apps.join("\n")));
         }

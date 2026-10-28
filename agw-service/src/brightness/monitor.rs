@@ -98,9 +98,8 @@ fn udev_monitor_loop(device_path: &Path, max_brightness: u32, current_brightness
         .match_subsystem("backlight")?
         .listen()?;
 
-    let initial = *current_brightness.lock().unwrap();
-    let normalized = initial as f64 / max_brightness as f64;
-    signal.emit_sync(normalized);
+    // The initial value is emitted by the inotify monitor; emitting here
+    // as well would broadcast the same state twice at startup.
 
     for event in socket.iter().filter(|event| event.syspath() == device_path) {
         match event.event_type() {

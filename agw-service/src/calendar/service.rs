@@ -46,7 +46,9 @@ use std::{
     sync::{
         Arc,
         Mutex,
+        atomic::AtomicBool,
     },
+    time::Duration as StdDuration,
 };
 use zbus::{
     Connection,
@@ -129,6 +131,12 @@ pub struct CalendarService {
 
     /// Signal emitted when calendar events change
     events_changed: Signal<()>,
+
+    /// True while a debounced change notification is queued. EDS usually
+    /// delivers a burst of object_added/modified/removed signals (initial
+    /// sync, background refresh); coalescing them means the UI rebuilds the
+    /// calendar once per burst instead of once per signal.
+    change_notification_scheduled: Arc<AtomicBool>,
 }
 
 impl CalendarService {
@@ -140,7 +148,39 @@ impl CalendarService {
             calendar_colors: Arc::new(Mutex::new(HashMap::new())),
             monitored_calendars: Arc::new(Mutex::new(HashSet::new())),
             events_changed: Signal::new(),
+            change_notification_scheduled: Arc::new(AtomicBool::new(false)),
         }
+    }
+
+    /// Schedule a single debounced `events_changed` notification.
+    ///
+    /// Clears the expansion cache and pre-expands the current month off the
+    /// main thread, so the UI's cache lookup right after the signal is a
+    /// hit instead of an expensive synchronous expansion on the GTK thread.
+    fn schedule_events_changed(&self) {
+        use std::sync::atomic::Ordering as AtomicOrdering;
+
+        if self.change_notification_scheduled.swap(true, AtomicOrdering::SeqCst) {
+            return;
+        }
+
+        let service = self.clone();
+        runtime::spawn(async move {
+            tokio::time::sleep(StdDuration::from_millis(250)).await;
+            service
+                .change_notification_scheduled
+                .store(false, AtomicOrdering::SeqCst);
+
+            let warm_service = service.clone();
+            let _ = tokio::task::spawn_blocking(move || {
+                warm_service.expanded_cache.lock().unwrap().clear();
+                let today = Local::now().date_naive();
+                warm_service.ensure_month_expanded(today.year(), today.month());
+            })
+            .await;
+
+            service.events_changed.emit_sync(());
+        });
     }
 
     /// Connect a callback to the events_changed signal
@@ -316,8 +356,7 @@ impl CalendarService {
             let total_components = store.len();
             drop(store);
 
-            self.expanded_cache.lock().unwrap().clear();
-            self.events_changed.emit_sync(());
+            self.schedule_events_changed();
             debug!(
                 "Initial components stored, total components: {}",
                 total_components
@@ -341,20 +380,27 @@ impl CalendarService {
                         continue;
                     }
 
+                    // EDS may re-deliver objects (initial view sync,
+                    // backend refresh). Upsert by UID instead of blindly
+                    // extending, otherwise the raw store grew duplicates
+                    // for the whole session.
+                    let added_uids: HashSet<String> = components
+                        .iter()
+                        .filter_map(|(_, component)| Self::get_component_uid(component))
+                        .collect();
                     let mut store = service_clone.raw_components.lock().unwrap();
+                    store.retain(|(_, component)| {
+                        Self::component_uid_str(component)
+                            .is_none_or(|uid| !added_uids.contains(uid))
+                    });
                     store.extend(components);
                     let total_components = store.len();
                     drop(store);
 
                     debug!("Total components in store: {}", total_components);
 
-                    let mut cache = service_clone.expanded_cache.lock().unwrap();
-                    let cleared_months: Vec<_> = cache.keys().cloned().collect();
-                    cache.clear();
-                    drop(cache);
-                    debug!("Cleared {} cached months", cleared_months.len());
-
-                    service_clone.events_changed.emit_sync(());
+                    debug!("Calendar objects changed, scheduling refresh");
+                    service_clone.schedule_events_changed();
                 }
             }
         });
@@ -370,19 +416,21 @@ impl CalendarService {
 
                     let components = Self::parse_raw_components(&ical_objects, &uid_clone2);
 
+                    let modified_uids: HashSet<&str> = components
+                        .iter()
+                        .filter_map(|(_, component)| Self::component_uid_str(component))
+                        .collect();
                     let mut store = service_clone2.raw_components.lock().unwrap();
-                    for (_calendar_uid, component) in &components {
-                        if let Some(event_uid) = Self::get_component_uid(component) {
-                            store.retain(|(_cal_uid, c)| Self::get_component_uid(c) != Some(event_uid.clone()));
-                        }
-                    }
+                    // Compare borrowed UIDs: the old version cloned a String
+                    // for every stored component on every comparison.
+                    store.retain(|(_, c)| {
+                        Self::component_uid_str(c).is_none_or(|uid| !modified_uids.contains(uid))
+                    });
                     store.extend(components);
                     drop(store);
 
-                    service_clone2.expanded_cache.lock().unwrap().clear();
-
-                    service_clone2.events_changed.emit_sync(());
-                    debug!("Emitted events_changed signal");
+                    service_clone2.schedule_events_changed();
+                    debug!("Calendar objects modified, scheduling refresh");
                 }
             }
         });
@@ -394,10 +442,25 @@ impl CalendarService {
                 if let Ok(args) = signal.args() {
                     debug!("Removed {} calendar objects", args.uids.len());
 
-                    service_clone3.expanded_cache.lock().unwrap().clear();
+                    // The old handler only dropped the cache, so deleted
+                    // events stayed in the raw store and came back on the
+                    // next expansion. Remove them for real.
+                    let removed_uids: HashSet<String> = args
+                        .uids
+                        .iter()
+                        .filter_map(|uid| String::try_from(uid.clone()).ok())
+                        .collect();
+                    if !removed_uids.is_empty() {
+                        let mut store = service_clone3.raw_components.lock().unwrap();
+                        store.retain(|(_, component)| {
+                            Self::component_uid_str(component)
+                                .is_none_or(|uid| !removed_uids.contains(uid))
+                        });
+                        drop(store);
+                    }
 
-                    service_clone3.events_changed.emit_sync(());
-                    debug!("Emitted events_changed signal");
+                    service_clone3.schedule_events_changed();
+                    debug!("Calendar objects removed, scheduling refresh");
                 }
             }
         });
@@ -448,11 +511,17 @@ impl CalendarService {
     }
 
     fn get_component_uid(component: &ICalendarComponent) -> Option<String> {
+        Self::component_uid_str(component).map(str::to_string)
+    }
+
+    /// Borrowed variant of [`Self::get_component_uid`]: lets hot paths
+    /// (dedupe, removal, expansion) compare UIDs without allocating.
+    fn component_uid_str(component: &ICalendarComponent) -> Option<&str> {
         component
             .property(&ICalendarProperty::Uid)
             .and_then(|entry| entry.values.first())
             .and_then(|val| match val {
-                ICalendarValue::Text(s) => Some(s.clone()),
+                ICalendarValue::Text(s) => Some(s.as_str()),
                 _ => None,
             })
     }
@@ -508,11 +577,14 @@ impl CalendarService {
         self.get_events_for_date(today)
     }
 
-    /// Ensure a specific month is expanded in cache
+    /// Ensure a specific month is expanded in cache.
+    ///
+    /// Expansion happens outside the cache lock: the old version held it for
+    /// the whole (potentially long) expansion, so a UI read arriving in the
+    /// meantime blocked the GTK main thread, and a concurrent cache clear
+    /// could make the follow-up lookup return empty.
     fn ensure_month_expanded(&self, year: i32, month: u32) {
-        let mut cache = self.expanded_cache.lock().unwrap();
-
-        if cache.contains_key(&(year, month)) {
+        if self.expanded_cache.lock().unwrap().contains_key(&(year, month)) {
             debug!("Month {}-{:02} already in cache", year, month);
             return;
         }
@@ -535,7 +607,10 @@ impl CalendarService {
             year,
             month
         );
-        cache.insert((year, month), events);
+        self.expanded_cache
+            .lock()
+            .unwrap()
+            .insert((year, month), events);
     }
 
     /// Expand all raw components for a specific month
@@ -545,25 +620,31 @@ impl CalendarService {
         let raw_components = self.raw_components.lock().unwrap();
         let mut events = Vec::new();
 
-        // Deduplicate by UID (EDS sometimes sends duplicates)
-        let mut unique_components = HashMap::new();
+        // Deduplicate by UID (EDS sometimes sends duplicates), keeping the
+        // last occurrence like the old HashMap did — but borrowing the
+        // components instead of deep-cloning every field of every event on
+        // each expansion.
+        let mut uid_index: HashMap<&str, usize> = HashMap::new();
+        let mut components: Vec<(&String, &ICalendarComponent)> = Vec::new();
+        for (calendar_uid, component) in raw_components.iter() {
+            let Some(uid) = Self::component_uid_str(component) else {
+                continue;
+            };
+            if let Some(&position) = uid_index.get(uid) {
+                components[position] = (calendar_uid, component);
+            } else {
+                uid_index.insert(uid, components.len());
+                components.push((calendar_uid, component));
+            }
+        }
 
-        raw_components
-            .iter()
-            .filter_map(|(calendar_uid, component)| Self::get_component_uid(component).map(|uid| (uid, calendar_uid.clone(), component.clone())))
-            .for_each(|(uid, calendar_uid, component)| {
-                unique_components.insert(uid, (calendar_uid, component));
-            });
-
-        if unique_components.len() < raw_components.len() {
+        if components.len() < raw_components.len() {
             debug!(
                 "Deduplicated {} components to {} unique UIDs",
                 raw_components.len(),
-                unique_components.len()
+                components.len()
             );
         }
-
-        let components: Vec<_> = unique_components.into_values().collect();
 
         let month_start = NaiveDate::from_ymd_opt(year, month, 1).unwrap();
         let month_end = if month == 12 {
@@ -1194,6 +1275,7 @@ impl Clone for CalendarService {
             calendar_colors: Arc::clone(&self.calendar_colors),
             monitored_calendars: Arc::clone(&self.monitored_calendars),
             events_changed: self.events_changed.clone(),
+            change_notification_scheduled: Arc::clone(&self.change_notification_scheduled),
         }
     }
 }

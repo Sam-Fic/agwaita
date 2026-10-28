@@ -43,7 +43,6 @@ use std::{
         self,
         JoinHandle,
     },
-    time::Duration,
 };
 
 const NORMAL: f64 = 65536.0; // libpulse_binding::volume::Volume::NORMAL.0
@@ -132,8 +131,21 @@ impl AudioService {
                         let _ = event_tx.send(());
                     })));
 
-                    // Polling loop to fetch sinks on events
+                    // Event loop: `iterate(true)` blocks in PulseAudio's
+                    // poll until the server has something to report, so an
+                    // idle shell performs no wakeups at all (the old loop
+                    // woke every 167 ms). The subscribe callback enqueues a
+                    // notification while iterating; it is drained after the
+                    // blocking iterate returns.
                     loop {
+                        match mainloop.iterate(true) {
+                            IterateResult::Quit(_) | IterateResult::Err(_) => {
+                                error!("PulseAudio mainloop error");
+                                break;
+                            },
+                            IterateResult::Success(_) => {},
+                        }
+
                         if event_rx.try_recv().is_ok() {
                             Self::fetch_server_info(&mut mainloop, &introspector, data.clone());
                             Self::fetch_sinks(
@@ -143,16 +155,6 @@ impl AudioService {
                                 callbacks.clone(),
                             );
                         }
-
-                        match mainloop.iterate(false) {
-                            IterateResult::Quit(_) | IterateResult::Err(_) => {
-                                error!("PulseAudio mainloop error");
-                                break;
-                            },
-                            IterateResult::Success(_) => {},
-                        }
-
-                        thread::sleep(Duration::from_millis(167));
                     }
                 },
                 Err(e) => {
@@ -164,26 +166,40 @@ impl AudioService {
 
     fn start_commander_thread(rx: mpsc::Receiver<AudioCommand>) {
         thread::spawn(move || match Self::create_pulse_context() {
-            Ok((mut mainloop, _context, mut introspector)) => loop {
-                while let Ok(cmd) = rx.try_recv() {
-                    match cmd {
-                        AudioCommand::SetVolume(name, channel_volumes) => {
-                            let op = introspector.set_sink_volume_by_name(&name, &channel_volumes, None);
-                            Self::wait_for_operation(&mut mainloop, op);
-                        },
-                        AudioCommand::SetMute(name, mute) => {
-                            let op = introspector.set_sink_mute_by_name(&name, mute, None);
-                            Self::wait_for_operation(&mut mainloop, op);
-                        },
+            Ok((mut mainloop, _context, mut introspector)) => {
+                // No polling: block on the command channel and pump the
+                // PulseAudio mainloop only while an operation completes.
+                while let Ok(cmd) = rx.recv() {
+                    let mut commands = vec![cmd];
+                    while let Ok(next) = rx.try_recv() {
+                        commands.push(next);
+                    }
+
+                    let mut healthy = true;
+                    for cmd in commands {
+                        match cmd {
+                            AudioCommand::SetVolume(name, channel_volumes) => {
+                                let op = introspector.set_sink_volume_by_name(&name, &channel_volumes, None);
+                                healthy &= Self::wait_for_operation(&mut mainloop, op);
+                            },
+                            AudioCommand::SetMute(name, mute) => {
+                                let op = introspector.set_sink_mute_by_name(&name, mute, None);
+                                healthy &= Self::wait_for_operation(&mut mainloop, op);
+                            },
+                        }
+                    }
+
+                    // Process any pending mainloop callbacks once the
+                    // operation(s) are done.
+                    if let IterateResult::Quit(_) | IterateResult::Err(_) = mainloop.iterate(false) {
+                        healthy = false;
+                    }
+
+                    if !healthy {
+                        error!("PulseAudio command connection lost");
+                        break;
                     }
                 }
-
-                match mainloop.iterate(false) {
-                    IterateResult::Quit(_) | IterateResult::Err(_) => break,
-                    IterateResult::Success(_) => {},
-                }
-
-                thread::sleep(Duration::from_millis(167));
             },
             Err(e) => {
                 error!("Failed to create commander context: {}", e);
@@ -224,14 +240,15 @@ impl AudioService {
         Ok((mainloop, context, introspector))
     }
 
-    fn wait_for_operation<T: ?Sized>(mainloop: &mut Mainloop, operation: Operation<T>) {
-        // Poll until operation is done
+    /// Pump the mainloop until the operation finishes. Returns false when
+    /// the PulseAudio connection itself failed.
+    fn wait_for_operation<T: ?Sized>(mainloop: &mut Mainloop, operation: Operation<T>) -> bool {
         loop {
             match mainloop.iterate(true) {
-                IterateResult::Quit(_) | IterateResult::Err(_) => break,
+                IterateResult::Quit(_) | IterateResult::Err(_) => return false,
                 IterateResult::Success(_) => {
                     if operation.get_state() == State::Done {
-                        break;
+                        return true;
                     }
                 },
             }

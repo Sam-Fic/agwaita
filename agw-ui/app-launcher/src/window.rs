@@ -338,7 +338,13 @@ impl SimpleComponent for AppLauncherWindow {
         let fav_css = gtk::CssProvider::new();
         fav_css.load_from_string(
             "button.fav-toggle:checked { background: none; }\
-             button.fav-toggle:checked:hover { background-image: linear-gradient(color-mix(in srgb, white 25%, transparent), color-mix(in srgb, white 25%, transparent)); }",
+             button.fav-toggle:checked:hover { background-image: linear-gradient(color-mix(in srgb, white 25%, transparent), color-mix(in srgb, white 25%, transparent)); }\
+             /* Row corner radii are applied as classes, not per-bind inline CSS:\
+                inline_css attaches a new CssProvider on every rebind of a\
+                recycled row, so providers accumulated for the whole session. */\
+             .launcher-row { outline: none; border-top-left-radius: 0; border-top-right-radius: 0; border-bottom-left-radius: 0; border-bottom-right-radius: 0; }\
+             .launcher-row-top { border-top-left-radius: 8px; border-top-right-radius: 8px; }\
+             .launcher-row-bottom { border-bottom-left-radius: 8px; border-bottom-right-radius: 8px; }",
         );
         if let Some(display) = gdk::Display::default() {
             gtk::style_context_add_provider_for_display(
@@ -713,46 +719,17 @@ impl SimpleComponent for AppLauncherWindow {
                 let position = list_item.position();
                 let n_items = selection_model_clone.n_items();
 
-                let mut css = String::from("outline: none;");
-                if position < n_items - 1 {
-                    css.push_str(
-                        "
-                        |border-bottom-left-radius: 0px;
-                        |border-bottom-right-radius: 0px;
-                        "
-                        .trim_margin()
-                        .as_str(),
-                    );
+                row.add_css_class("launcher-row");
+                if position == 0 {
+                    row.add_css_class("launcher-row-top");
                 } else {
-                    css.push_str(
-                        "
-                        |border-bottom-left-radius: 8px;
-                        |border-bottom-right-radius: 8px;
-                        "
-                        .trim_margin()
-                        .as_str(),
-                    );
+                    row.remove_css_class("launcher-row-top");
                 }
-                if position > 0 {
-                    css.push_str(
-                        "
-                        |border-top-left-radius: 0px;
-                        |border-top-right-radius: 0px;
-                        "
-                        .trim_margin()
-                        .as_str(),
-                    );
+                if position + 1 == n_items {
+                    row.add_css_class("launcher-row-bottom");
                 } else {
-                    css.push_str(
-                        "
-                        |border-top-left-radius: 8px;
-                        |border-top-right-radius: 8px;
-                        "
-                        .trim_margin()
-                        .as_str(),
-                    );
+                    row.remove_css_class("launcher-row-bottom");
                 }
-                row.inline_css(&css);
             }
         });
 

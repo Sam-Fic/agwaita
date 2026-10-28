@@ -1070,7 +1070,12 @@ pub fn run_app() -> Result<(), AgwError> {
          .qs-button > button { padding: 0; margin: 5px 0; }\n\
          /* The clock keeps its text padding but must not fill the 40px bar
             vertically either — same 5px top/bottom inset as the others. */\n\
-         .clock-button > button { margin: 5px 0; }",
+         .clock-button > button { margin: 5px 0; }\n\
+         /* Calendar day grid: today's ring and the event dot used to be
+            per-widget inline CSS; classes let the 42 persistent cells toggle
+            state without attaching a new CSS provider each time. */\n\
+         button.calendar-today { border: 2px solid @accent_color; }\n\
+         label.calendar-event-dot { background: @accent_color; border-radius: 2px; min-width: 4px; min-height: 4px; }",
     );
     if let Some(display) = gdk::Display::default() {
         gtk::style_context_add_provider_for_display(

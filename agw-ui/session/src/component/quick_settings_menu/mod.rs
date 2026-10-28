@@ -314,9 +314,9 @@ impl SimpleComponent for QuickSettingsMenu {
                         .emit(QuickSettingsPopoverInput::UpdateBrightness(level));
                 },
                 SystemStateUpdate::Audio(volume, muted) => {
-                    // Update both the icon and the popover
-                    self.audio_icon.emit(AudioIconInput::UpdateVolume(volume));
-                    self.audio_icon.emit(AudioIconInput::UpdateMuted(muted));
+                    // Update both the icon and the popover in one message
+                    self.audio_icon
+                        .emit(AudioIconInput::UpdateVolumeState(volume, muted));
                     self.popover
                         .emit(QuickSettingsPopoverInput::UpdateAudio(volume, muted));
                 },

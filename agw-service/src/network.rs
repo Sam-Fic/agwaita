@@ -1,4 +1,10 @@
 //! Network monitoring via systemd-networkd/iwd (D-Bus + polling).
+//!
+//! State collection avoids subprocess forks: interface state comes from
+//! sysfs (`/sys/class/net`), the default route from `/proc/net/route`, and
+//! WiFi signal strength from `/proc/net/wireless` (with `iw` only as a
+//! fallback when the wireless procfs entry is missing or stale). Combined
+//! with change detection, an idle system performs zero forks.
 
 use crate::{
     dbus_const::{
@@ -16,6 +22,7 @@ use log::{
     warn,
 };
 use std::{
+    path::Path,
     process::Command,
     sync::{
         Arc,
@@ -26,6 +33,13 @@ use std::{
         },
     },
 };
+
+/// Signal strength changes below this threshold (percent) do not trigger a
+/// callback, so RSSI jitter stays silent.
+const STRENGTH_HYSTERESIS: u8 = 5;
+
+/// How often WiFi signal strength is sampled while a WiFi connection is up.
+const WIFI_POLL_INTERVAL: std::time::Duration = std::time::Duration::from_secs(3);
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum NetworkType {
@@ -52,22 +66,31 @@ pub struct NetworkService {
 }
 
 impl NetworkService {
+    /// Creates the service with a cheap initial probe.
+    ///
+    /// The probe is dominated by sysfs/procfs reads (no `ip`/`iw` fork on
+    /// the common paths) and guarantees that subscribers get the real
+    /// network state in their initial snapshot, even if they subscribe
+    /// before the background monitor's first broadcast. The monitor still
+    /// performs its own refresh on its thread and emits corrections.
     pub fn new() -> Self {
-        let service = Self {
-            network_type: Arc::new(Mutex::new(NetworkType::None)),
-            connected: Arc::new(Mutex::new(false)),
-            wifi_strength: Arc::new(Mutex::new(0)),
-            interface: Arc::new(Mutex::new(None)),
-        };
+        let (network_type, connected, wifi_strength, interface) =
+            match Self::probe_network_state() {
+                Some(state) => (
+                    state.network_type,
+                    state.connected,
+                    state.wifi_strength,
+                    state.interface,
+                ),
+                None => (NetworkType::None, false, 0, None),
+            };
 
-        if let Some(state) = service.get_network_state() {
-            *service.network_type.lock().unwrap() = state.network_type;
-            *service.connected.lock().unwrap() = state.connected;
-            *service.wifi_strength.lock().unwrap() = state.wifi_strength;
-            *service.interface.lock().unwrap() = state.interface;
+        Self {
+            network_type: Arc::new(Mutex::new(network_type)),
+            connected: Arc::new(Mutex::new(connected)),
+            wifi_strength: Arc::new(Mutex::new(wifi_strength)),
+            interface: Arc::new(Mutex::new(interface)),
         }
-
-        service
     }
 
     /// Get current network state.
@@ -81,17 +104,28 @@ impl NetworkService {
     }
 
     /// Start hybrid monitoring: D-Bus events + conditional WiFi strength polling.
+    ///
+    /// The initial state refresh and broadcast happen on the monitor's own
+    /// thread so neither the caller nor the GTK main thread ever blocks on
+    /// interface probing. Subsequent updates only invoke the callback when
+    /// the state actually changed (with hysteresis for signal strength), so
+    /// unchanged poll results no longer wake every subscriber.
     pub fn start_hybrid_monitor<F>(&self, callback: F)
     where
         F: Fn(NetworkType, bool, u8) + Send + 'static + Clone,
     {
         let service = self.clone_service();
         let callback = Arc::new(Mutex::new(callback));
-        let wifi_polling_active = Arc::new(AtomicBool::new(false));
+        let initial_state = service.get_state();
+        let wifi_polling_active = Arc::new(AtomicBool::new(
+            initial_state.network_type == NetworkType::Wifi && initial_state.connected,
+        ));
+        let last_emitted: Arc<Mutex<Option<NetworkState>>> = Arc::new(Mutex::new(None));
 
         let service_dbus = service.clone_service();
         let callback_dbus = Arc::clone(&callback);
         let wifi_polling_ref = Arc::clone(&wifi_polling_active);
+        let last_emitted_dbus = Arc::clone(&last_emitted);
 
         std::thread::spawn(move || {
             runtime::runtime().block_on(async move {
@@ -124,6 +158,16 @@ impl NetworkService {
 
                         info!("Subscribed to iwd PropertiesChanged signals");
 
+                        // Initial refresh + broadcast: replaces the
+                        // synchronous probe that used to run on the GTK
+                        // main thread during startup.
+                        emit_state_if_changed(
+                            &service_dbus,
+                            &callback_dbus,
+                            &wifi_polling_ref,
+                            &last_emitted_dbus,
+                        );
+
                         let mut stream = zbus::MessageStream::from(&connection);
 
                         while let Some(msg) = stream.next().await {
@@ -148,15 +192,12 @@ impl NetworkService {
                                             let is_adapter_powered = interface_name == "net.connman.iwd.Adapter" && changed_properties.contains_key("Powered");
 
                                             if is_station_state || is_network_connected || is_adapter_powered {
-                                                service_dbus.refresh_state();
-                                                let state = service_dbus.get_state();
-
-                                                let should_poll = state.network_type == NetworkType::Wifi && state.connected;
-                                                wifi_polling_ref.store(should_poll, Ordering::Relaxed);
-
-                                                if let Ok(cb) = callback_dbus.lock() {
-                                                    cb(state.network_type, state.connected, state.wifi_strength);
-                                                }
+                                                emit_state_if_changed(
+                                                    &service_dbus,
+                                                    &callback_dbus,
+                                                    &wifi_polling_ref,
+                                                    &last_emitted_dbus,
+                                                );
                                             }
                                         }
                                     }
@@ -179,20 +220,32 @@ impl NetworkService {
         let service_poll = service.clone_service();
         let callback_poll = Arc::clone(&callback);
         let wifi_polling_poll = Arc::clone(&wifi_polling_active);
+        let last_emitted_poll = Arc::clone(&last_emitted);
 
         std::thread::spawn(move || {
+            // Initial sample: the D-Bus thread performs one too, but this
+            // keeps the state correct on systems where the bus monitor is
+            // unavailable. Change detection collapses the duplicate.
+            emit_state_if_changed(
+                &service_poll,
+                &callback_poll,
+                &wifi_polling_poll,
+                &last_emitted_poll,
+            );
+
             loop {
-                std::thread::sleep(std::time::Duration::from_secs(3));
+                std::thread::sleep(WIFI_POLL_INTERVAL);
 
                 if wifi_polling_poll.load(Ordering::Relaxed) {
-                    service_poll.refresh_state();
-                    let state = service_poll.get_state();
-
-                    if state.network_type == NetworkType::Wifi && state.connected {
-                        if let Ok(cb) = callback_poll.lock() {
-                            cb(state.network_type, state.connected, state.wifi_strength);
-                        }
-                    }
+                    // Refresh only while a WiFi connection is up: this
+                    // sample exists purely to track signal strength. Link
+                    // and route changes arrive via the D-Bus monitor.
+                    emit_state_if_changed(
+                        &service_poll,
+                        &callback_poll,
+                        &wifi_polling_poll,
+                        &last_emitted_poll,
+                    );
                 }
             }
         });
@@ -216,77 +269,44 @@ impl NetworkService {
         }
     }
 
+    /// Collect the current network state.
+    ///
+    /// Everything except the `iw` fallback is pure procfs/sysfs reads, so a
+    /// refresh normally costs zero forks: interfaces come from
+    /// `/sys/class/net/*/flags`, the default route from `/proc/net/route`,
+    /// and WiFi signal strength from `/proc/net/wireless`.
     fn get_network_state(&self) -> Option<NetworkState> {
-        let output = Command::new("ip")
-            .args(&["-br", "link", "show", "up"])
-            .output()
-            .ok()?;
+        Self::probe_network_state()
+    }
 
-        let stdout = String::from_utf8_lossy(&output.stdout);
-        let lines: Vec<&str> = stdout.trim().split('\n').collect();
+    fn probe_network_state() -> Option<NetworkState> {
+        let interfaces = Self::up_interfaces()?;
+        let default_route_interfaces = Self::default_route_interfaces()?;
+        let has_default_route = !default_route_interfaces.is_empty();
 
-        let wired_interfaces: Vec<&str> = lines
+        let wired_interfaces: Vec<&str> = interfaces
             .iter()
-            .filter(|line| !line.starts_with("lo") && (line.contains("eth") || line.contains("enp") || line.contains("eno")))
-            .copied()
+            .map(String::as_str)
+            .filter(|name| Self::is_wired_name(name))
             .collect();
 
-        let wifi_interfaces: Vec<&str> = lines
+        let wifi_interfaces: Vec<&str> = interfaces
             .iter()
-            .filter(|line| !line.starts_with("lo") && (line.contains("wlan") || line.contains("wlp")))
-            .copied()
+            .map(String::as_str)
+            .filter(|name| Self::is_wifi_name(name))
             .collect();
-
-        let route_output = Command::new("ip")
-            .args(&["route", "show", "default"])
-            .output()
-            .ok()?;
-
-        let route_stdout = String::from_utf8_lossy(&route_output.stdout);
-        let has_default_route = !route_stdout.trim().is_empty();
-
-        let wifi_interface_default = wifi_interfaces.first();
-        let wired_interface_default = wired_interfaces.first();
 
         if !has_default_route {
-            if let Some(wifi_iface) = wifi_interface_default {
-                let interface_name = wifi_iface.split_whitespace().next()?.to_string();
-
-                match Command::new("iw")
-                    .args(&["dev", &interface_name, "link"])
-                    .output()
-                {
-                    Ok(iw_output) => {
-                        let iw_stdout = String::from_utf8_lossy(&iw_output.stdout);
-
-                        if !iw_stdout.contains("Not connected") && iw_stdout.contains("Connected to") {
-                            let strength = Self::parse_wifi_strength(&iw_stdout);
-                            return Some(NetworkState {
-                                network_type: NetworkType::Wifi,
-                                connected: true,
-                                wifi_strength: strength,
-                                interface: Some(interface_name),
-                            });
-                        }
-                    },
-                    Err(_) => {},
-                }
-
-                return Some(NetworkState {
-                    network_type: NetworkType::Wifi,
-                    connected: false,
-                    wifi_strength: 0,
-                    interface: Some(interface_name),
-                });
+            if let Some(wifi_iface) = wifi_interfaces.first() {
+                return Some(Self::wifi_state(wifi_iface));
             }
 
-            if let Some(wired_iface) = wired_interface_default {
-                let interface_name = wired_iface.split_whitespace().next()?.to_string();
+            if let Some(wired_iface) = wired_interfaces.first() {
                 return Some(NetworkState {
                     network_type: NetworkType::Wired,
                     connected: false,
                     wifi_strength: 0,
-                    interface: Some(interface_name),
+                    interface: Some((*wired_iface).to_string()),
                 });
             }
             return Some(NetworkState {
@@ -297,64 +317,21 @@ impl NetworkService {
             });
         }
 
-        if wired_interface_default.is_some() && (route_stdout.contains("eth") || route_stdout.contains("enp") || route_stdout.contains("eno")) {
-            let interface_name = wired_interface_default?
-                .split_whitespace()
-                .next()?
-                .to_string();
+        let default_over_wired = default_route_interfaces
+            .iter()
+            .any(|iface| Self::is_wired_name(iface));
+
+        if !wired_interfaces.is_empty() && default_over_wired {
             return Some(NetworkState {
                 network_type: NetworkType::Wired,
                 connected: true,
                 wifi_strength: 0,
-                interface: Some(interface_name),
+                interface: wired_interfaces.first().map(|s| (*s).to_string()),
             });
         }
 
-        if let Some(wifi_iface) = wifi_interface_default {
-            let interface_name = wifi_iface.split_whitespace().next()?.to_string();
-
-            match Command::new("iw")
-                .args(&["dev", &interface_name, "link"])
-                .output()
-            {
-                Ok(iw_output) => {
-                    let iw_stdout = String::from_utf8_lossy(&iw_output.stdout);
-
-                    if iw_stdout.contains("Not connected") {
-                        return Some(NetworkState {
-                            network_type: NetworkType::Wifi,
-                            connected: false,
-                            wifi_strength: 0,
-                            interface: Some(interface_name),
-                        });
-                    }
-
-                    let strength = Self::parse_wifi_strength(&iw_stdout);
-
-                    debug!(
-                        "WiFi interface {} signal: {} dBm ({}%)",
-                        interface_name,
-                        Self::extract_signal_dbm(&iw_stdout).unwrap_or(0),
-                        strength
-                    );
-
-                    return Some(NetworkState {
-                        network_type: NetworkType::Wifi,
-                        connected: true,
-                        wifi_strength: strength,
-                        interface: Some(interface_name),
-                    });
-                },
-                Err(e) => {
-                    warn!("Failed to query iw for interface {}: {}", interface_name, e);
-                    return Some(NetworkState {
-                        network_type: NetworkType::Wifi,
-                        connected: true,
-                        wifi_strength: 50,
-                        interface: Some(interface_name),
-                    });
-                },
-            }
+        if let Some(wifi_iface) = wifi_interfaces.first() {
+            return Some(Self::wifi_state(wifi_iface));
         }
 
         Some(NetworkState {
@@ -363,6 +340,139 @@ impl NetworkService {
             wifi_strength: 0,
             interface: None,
         })
+    }
+
+    fn is_wired_name(name: &str) -> bool {
+        name.contains("eth") || name.contains("enp") || name.contains("eno")
+    }
+
+    fn is_wifi_name(name: &str) -> bool {
+        name.contains("wlan") || name.contains("wlp")
+    }
+
+    /// Interfaces that are administratively UP, from sysfs (equivalent of
+    /// `ip -br link show up` without the fork).
+    fn up_interfaces() -> Option<Vec<String>> {
+        let net_class = Path::new("/sys/class/net");
+        let mut names = Vec::new();
+        for entry in std::fs::read_dir(net_class).ok()? {
+            let entry = entry.ok()?;
+            let name = entry.file_name().to_string_lossy().to_string();
+            if name == "lo" {
+                continue;
+            }
+            // IFF_UP is bit 0 of the flags bitmask.
+            let up = std::fs::read_to_string(net_class.join(&name).join("flags"))
+                .ok()
+                .and_then(|flags| u32::from_str_radix(flags.trim().trim_start_matches("0x"), 16).ok())
+                .is_some_and(|flags| flags & 0x1 != 0);
+            if up {
+                names.push(name);
+            }
+        }
+        Some(names)
+    }
+
+    /// Interfaces that own a default route, from `/proc/net/route`
+    /// (equivalent of `ip route show default` without the fork).
+    fn default_route_interfaces() -> Option<Vec<String>> {
+        let route_table = std::fs::read_to_string("/proc/net/route").ok()?;
+        let mut interfaces = Vec::new();
+        for line in route_table.lines().skip(1) {
+            let mut columns = line.split_whitespace();
+            let (Some(iface), Some(destination), Some(flags)) =
+                (columns.next(), columns.next(), columns.next())
+            else {
+                continue;
+            };
+            // Destination 00000000 = default route; RTF_UP (0x1) must be set.
+            let is_default = destination == "00000000"
+                && u32::from_str_radix(flags, 16)
+                    .is_ok_and(|flags| flags & 0x1 != 0);
+            if is_default && !interfaces.iter().any(|existing| existing == iface) {
+                interfaces.push(iface.to_string());
+            }
+        }
+        Some(interfaces)
+    }
+
+    /// WiFi state for one interface: connected status and signal strength.
+    ///
+    /// `/proc/net/wireless` is the fast path (no fork); `iw dev <iface> link`
+    /// only runs when procfs has no usable level (stale wext data or an
+    /// interface that is actually disconnected).
+    fn wifi_state(interface: &str) -> NetworkState {
+        let disconnected = NetworkState {
+            network_type: NetworkType::Wifi,
+            connected: false,
+            wifi_strength: 0,
+            interface: Some(interface.to_string()),
+        };
+
+        if let Some(signal_dbm) = Self::wireless_level_dbm(interface)
+            && signal_dbm < 0
+        {
+            return NetworkState {
+                network_type: NetworkType::Wifi,
+                connected: true,
+                wifi_strength: Self::strength_from_dbm(signal_dbm),
+                interface: Some(interface.to_string()),
+            };
+        }
+        // Level of 0 usually means "not associated" — but confirm via `iw`
+        // because some drivers never update the procfs entry.
+
+        match Command::new("iw")
+            .args(["dev", interface, "link"])
+            .output()
+        {
+            Ok(iw_output) => {
+                let iw_stdout = String::from_utf8_lossy(&iw_output.stdout);
+
+                if iw_stdout.contains("Not connected") {
+                    return disconnected;
+                }
+
+                let strength = Self::parse_wifi_strength(&iw_stdout);
+                NetworkState {
+                    network_type: NetworkType::Wifi,
+                    connected: true,
+                    wifi_strength: strength,
+                    interface: Some(interface.to_string()),
+                }
+            },
+            Err(e) => {
+                warn!("Failed to query iw for interface {}: {}", interface, e);
+                NetworkState {
+                    network_type: NetworkType::Wifi,
+                    connected: true,
+                    wifi_strength: 50,
+                    interface: Some(interface.to_string()),
+                }
+            },
+        }
+    }
+
+    /// Signal level in dBm from `/proc/net/wireless`, if the interface is
+    /// listed there.
+    fn wireless_level_dbm(interface: &str) -> Option<i32> {
+        let wireless = std::fs::read_to_string("/proc/net/wireless").ok()?;
+        let prefix = format!("{}:", interface);
+        for line in wireless.lines().skip(2) {
+            let mut columns = line.split_whitespace();
+            let Some(face) = columns.next() else {
+                continue;
+            };
+            if face != prefix {
+                continue;
+            }
+            // Columns: face | status | link | level | noise | ...
+            let _status = columns.next()?;
+            let _link = columns.next()?;
+            let level = columns.next()?;
+            return level.trim_end_matches('.').parse::<i32>().ok();
+        }
+        None
     }
 
     fn refresh_state(&self) -> bool {
@@ -388,14 +498,17 @@ impl NetworkService {
     }
 
     fn parse_wifi_strength(iw_output: &str) -> u8 {
-        if let Some(signal_dbm) = Self::extract_signal_dbm(iw_output) {
-            let strength = ((signal_dbm + 90) as f64 / 60.0 * 100.0)
-                .max(0.0)
-                .min(100.0);
-            strength as u8
-        } else {
-            50
+        match Self::extract_signal_dbm(iw_output) {
+            Some(signal_dbm) => Self::strength_from_dbm(signal_dbm),
+            None => 50,
         }
+    }
+
+    /// Map a signal level in dBm onto the 0-100% scale (the same curve the
+    /// `iw`-based path has always used: -90 dBm → 0%, -30 dBm → 100%).
+    fn strength_from_dbm(signal_dbm: i32) -> u8 {
+        let strength = ((signal_dbm + 90) as f64 / 60.0 * 100.0).clamp(0.0, 100.0);
+        strength as u8
     }
 
     fn extract_signal_dbm(iw_output: &str) -> Option<i32> {
@@ -412,6 +525,63 @@ impl NetworkService {
             }
         }
         None
+    }
+}
+
+impl Default for NetworkService {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+/// Refresh the service state, update the WiFi polling gate and invoke the
+/// callback — but only when something meaningful changed: the type, the
+/// connectivity, or a signal-strength move beyond the hysteresis. This keeps
+/// idle polls silent instead of waking every subscriber every few seconds.
+fn emit_state_if_changed<F>(
+    service: &NetworkService,
+    callback: &Arc<Mutex<F>>,
+    wifi_polling_active: &AtomicBool,
+    last_emitted: &Mutex<Option<NetworkState>>,
+) where
+    F: Fn(NetworkType, bool, u8) + Send,
+{
+    if !service.refresh_state() {
+        return;
+    }
+
+    let state = service.get_state();
+    wifi_polling_active.store(
+        state.network_type == NetworkType::Wifi && state.connected,
+        Ordering::Relaxed,
+    );
+
+    let changed = match last_emitted.lock() {
+        Ok(mut last) => {
+            let is_new_state = match last.as_ref() {
+                Some(previous) => {
+                    previous.network_type != state.network_type
+                        || previous.connected != state.connected
+                        || state.wifi_strength.abs_diff(previous.wifi_strength) > STRENGTH_HYSTERESIS
+                },
+                None => true,
+            };
+            if is_new_state {
+                *last = Some(state.clone());
+            }
+            is_new_state
+        },
+        Err(_) => true,
+    };
+
+    if changed {
+        debug!(
+            "Network state changed: type={:?}, connected={}, strength={}%",
+            state.network_type, state.connected, state.wifi_strength
+        );
+        if let Ok(cb) = callback.lock() {
+            cb(state.network_type.clone(), state.connected, state.wifi_strength);
+        }
     }
 }
 
@@ -452,6 +622,34 @@ impl NetworkMonitor {
             self.last_type = state.network_type;
             self.last_connected = state.connected;
             self.last_strength = state.wifi_strength;
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn strength_from_dbm_maps_and_clamps() {
+        assert_eq!(NetworkService::strength_from_dbm(-30), 100);
+        assert_eq!(NetworkService::strength_from_dbm(-60), 50);
+        assert_eq!(NetworkService::strength_from_dbm(-90), 0);
+        assert_eq!(NetworkService::strength_from_dbm(-120), 0);
+    }
+
+    #[test]
+    fn probed_state_is_internally_consistent() {
+        // The initial probe reflects the host, so only assert invariants.
+        let service = NetworkService::default();
+        let state = service.get_state();
+
+        if state.network_type != NetworkType::Wifi {
+            assert_eq!(state.wifi_strength, 0, "non-WiFi links carry no RSSI");
+        }
+        if !state.connected {
+            assert_eq!(state.wifi_strength, 0, "disconnected links carry no RSSI");
+            assert!(state.interface.is_some() || state.network_type == NetworkType::None);
         }
     }
 }

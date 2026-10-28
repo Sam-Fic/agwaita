@@ -187,26 +187,38 @@ impl PipeWireMonitor {
 
         inotify.watches().add(
             WEBCAM_DEVICE_PATH,
-            WatchMask::CLOSE_WRITE | WatchMask::CLOSE_NOWRITE | WatchMask::DELETE_SELF | WatchMask::OPEN | WatchMask::ATTRIB,
+            // ATTRIB is unrelated to device access and only added noise.
+            WatchMask::CLOSE_WRITE | WatchMask::CLOSE_NOWRITE | WatchMask::DELETE_SELF | WatchMask::OPEN,
         )?;
 
-        let mut buffer = [0; 512];
+        let mut buffer = [0; 4096];
         debug!("Webcam listener started for {}", WEBCAM_DEVICE_PATH);
 
         loop {
+            // One blocking read returns a whole batch; collapse it into a
+            // single state-manager event so a probe burst (open/close/open)
+            // costs one /proc scan, not one per event.
+            let mut any_open = false;
+            let mut any_close = false;
+
             let events = inotify.read_events_blocking(&mut buffer)?;
 
             for event in events {
                 // trace!("Webcam event: {:?}", event.mask);
-                match event.mask {
-                    EventMask::OPEN => {
-                        let _ = tx.send(PrivacyEvent::WebcamOpen);
-                    },
-                    EventMask::CLOSE_WRITE | EventMask::CLOSE_NOWRITE => {
-                        let _ = tx.send(PrivacyEvent::WebcamClose);
-                    },
-                    _ => {},
+                if event.mask.contains(EventMask::OPEN) {
+                    any_open = true;
                 }
+                if event.mask.contains(EventMask::CLOSE_WRITE)
+                    || event.mask.contains(EventMask::CLOSE_NOWRITE)
+                {
+                    any_close = true;
+                }
+            }
+
+            if any_close {
+                let _ = tx.send(PrivacyEvent::WebcamClose);
+            } else if any_open {
+                let _ = tx.send(PrivacyEvent::WebcamOpen);
             }
         }
     }
@@ -231,14 +243,13 @@ impl PipeWireMonitor {
                 PrivacyEvent::RemoveNode(id) => {
                     nodes.retain(|n| n.id != id);
                 },
-                PrivacyEvent::WebcamOpen => {
-                    let new_count = is_device_in_use(WEBCAM_DEVICE_PATH);
-                    if new_count != webcam_access {
-                        webcam_access = new_count;
-                        debug!("Webcam access count updated: {}", webcam_access);
-                    }
-                },
-                PrivacyEvent::WebcamClose => {
+                PrivacyEvent::WebcamOpen | PrivacyEvent::WebcamClose => {
+                    // Both events mean "the device usage set may have
+                    // changed". The listener already collapses each inotify
+                    // read batch into a single event, so one scan runs per
+                    // burst; scanning here (instead of throttling) keeps the
+                    // final state exact even when the last event of a burst
+                    // is a close.
                     let new_count = is_device_in_use(WEBCAM_DEVICE_PATH);
                     if new_count != webcam_access {
                         webcam_access = new_count;
@@ -347,8 +358,15 @@ fn is_device_in_use(target: &str) -> i32 {
     if let Ok(entries) = fs::read_dir("/proc") {
         entries
             .flatten()
+            // Only PID directories: skipping the rest avoids a stat per
+            // non-process entry on every scan.
+            .filter(|entry| {
+                entry
+                    .file_name()
+                    .to_str()
+                    .is_some_and(|name| name.bytes().all(|byte| byte.is_ascii_digit()))
+            })
             .map(|entry| entry.path())
-            .filter(|path| path.join("fd").exists())
             .filter_map(|pid_path| fs::read_dir(pid_path.join("fd")).ok())
             .flat_map(|fd_entries| fd_entries.flatten())
             .filter_map(|fd_entry| fs::read_link(fd_entry.path()).ok())

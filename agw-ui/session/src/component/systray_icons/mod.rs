@@ -363,6 +363,9 @@ pub async fn watcher_registered_items(watcher: StatusNotifierWatcherProxy<'stati
 pub struct SystemTrayIcons {
     items: Vec<StatusNotifierItem>,
     container: gtk::Box,
+    /// Live buttons keyed by service name, so icon/status refreshes update
+    /// one button in place instead of tearing down every tray item.
+    buttons: std::collections::HashMap<String, gtk::MenuButton>,
 }
 
 #[derive(Debug)]
@@ -417,6 +420,7 @@ impl SimpleComponent for SystemTrayIcons {
         let model = SystemTrayIcons {
             items: Vec::new(),
             container: root.clone(),
+            buttons: std::collections::HashMap::new(),
         };
 
         let widgets = view_output!();
@@ -434,24 +438,40 @@ impl SimpleComponent for SystemTrayIcons {
                     "Registering item: service_name={}, display_name={}",
                     item.service_name, item.display_name
                 );
-                // Check if item already exists (update or push)
-                if let Some(existing) = self
+                // An existing item is almost always an icon refresh (tray
+                // apps emit NewIcon liberally). Update that one button in
+                // place — rebuilding the whole tray on every icon change
+                // recreated N menu buttons + N popover menus with their
+                // gio::Menu trees and actions, which was a visible stutter
+                // whenever a tray app animated its icon.
+                if let Some(position) = self
                     .items
-                    .iter_mut()
-                    .find(|i| i.service_name == item.service_name)
+                    .iter()
+                    .position(|i| i.service_name == item.service_name)
                 {
-                    *existing = item;
-                } else {
-                    self.items.push(item);
+                    let layout_changed = self.items[position].layout != item.layout;
+                    self.items[position] = item.clone();
+                    let popover = layout_changed
+                        .then(|| self.create_menu_popover(&self.items[position]));
+                    if let Some(button) = self.buttons.get(&item.service_name) {
+                        Self::apply_button_content(button, &item);
+                        if let Some(popover) = popover {
+                            button.set_popover(Some(&popover));
+                        }
+                    }
+                    return;
                 }
-                self.refresh_tray_icons();
+
+                let button = self.create_tray_button(&item);
+                self.container.append(&button);
+                self.buttons.insert(item.service_name.clone(), button);
+                self.items.push(item);
             },
             SystemTrayIconsInput::ItemUnregistered(service_name) => {
                 debug!("Unregistering item: {}", service_name);
-                let len_before = self.items.len();
                 self.items.retain(|item| item.service_name != service_name);
-                if self.items.len() != len_before {
-                    self.refresh_tray_icons();
+                if let Some(button) = self.buttons.remove(&service_name) {
+                    self.container.remove(&button);
                 }
             },
             SystemTrayIconsInput::IconChanged(service_name) => {
@@ -473,12 +493,20 @@ impl SimpleComponent for SystemTrayIcons {
                 sender.input(SystemTrayIconsInput::IconChanged(service_name));
             },
             SystemTrayIconsInput::MenuLayoutChanged(service_name, layout) => {
-                if let Some(item) = self
+                let Some(position) = self
                     .items
-                    .iter_mut()
-                    .find(|item| item.service_name == service_name)
-                {
-                    item.layout = layout;
+                    .iter()
+                    .position(|item| item.service_name == service_name)
+                else {
+                    return;
+                };
+                if self.items[position].layout == layout {
+                    return;
+                }
+                self.items[position].layout = layout;
+                let popover = self.create_menu_popover(&self.items[position]);
+                if let Some(button) = self.buttons.get(&service_name) {
+                    button.set_popover(Some(&popover));
                 }
             },
         }
@@ -535,60 +563,67 @@ impl SystemTrayIcons {
         Some(format!("{}{}", modifier_string, base_key))
     }
 
-    fn refresh_tray_icons(&self) {
-        debug!("Refreshing tray icons, count: {}", self.items.len());
+    /// Build a tray button for one item: image child, popover menu and
+    /// tooltip. Used once when the item first appears.
+    fn create_tray_button(&self, item: &StatusNotifierItem) -> gtk::MenuButton {
+        let menu_button = gtk::MenuButton::new();
+        menu_button.add_css_class("flat");
+        // Square hover footprint (see .tray-button rule in the global CSS).
+        menu_button.add_css_class("tray-button");
 
-        // Remove all existing buttons
-        while let Some(child) = self.container.first_child() {
-            self.container.remove(&child);
-        }
+        Self::apply_button_content(&menu_button, item);
 
-        // Add a MenuButton for each system tray item
-        for item in &self.items {
-            let menu_button = gtk::MenuButton::new();
-            menu_button.add_css_class("flat");
-            // Square hover footprint (see .tray-button rule in the global CSS).
-            menu_button.add_css_class("tray-button");
+        let popover = self.create_menu_popover(item);
+        menu_button.set_popover(Some(&popover));
+        menu_button.set_tooltip_text(Some(&item.display_name));
+        menu_button
+    }
 
-            // Set icon from pixbuf or icon name
-            if let Some(ref icon_name) = item.icon_name {
-                let image = gtk::Image::from_icon_name(icon_name);
+    /// Refresh just the icon of an existing tray button (name or pixbuf),
+    /// leaving the popover, actions and widget identity untouched.
+    fn apply_button_content(menu_button: &gtk::MenuButton, item: &StatusNotifierItem) {
+        // Reuse the existing Image child across refreshes: tray apps that
+        // update their icon frequently (system monitors, unread counters)
+        // no longer allocate a new widget per update.
+        let image = match menu_button
+            .child()
+            .and_then(|child| child.downcast::<gtk::Image>().ok())
+        {
+            Some(image) => image,
+            None => {
+                let image = gtk::Image::new();
                 image.set_pixel_size(16);
                 menu_button.set_child(Some(&image));
-            } else if let Some(ref pixbuf) = item.icon_pixbuf {
-                // set_pixel_size only applies to named icons; a raw pixbuf
-                // would render at its native size (SNI icons are commonly
-                // 32px+) and stretch the square hover footprint. Scale it
-                // down to the same 16px the named icons use.
-                #[allow(deprecated)]
-                let scaled = if pixbuf.width() == 16 && pixbuf.height() == 16 {
-                    None
-                } else {
-                    pixbuf.scale_simple(16, 16, gtk::gdk_pixbuf::InterpType::Bilinear)
-                };
-                let source = scaled.as_ref().unwrap_or(pixbuf);
-                #[allow(deprecated)]
-                let texture = gtk::gdk::Texture::for_pixbuf(source);
-                let image = gtk::Image::from_paintable(Some(&texture));
-                menu_button.set_child(Some(&image));
-            } else {
-                warn!(
-                    "No icon available for {}, showing fallback icon",
-                    item.display_name
-                );
-                let image = gtk::Image::from_icon_name("application-x-executable");
-                image.set_pixel_size(16);
-                menu_button.set_child(Some(&image));
+                image
             }
+        };
 
-            // Create popover menu from DBus menu layout with actions
-            let popover = self.create_menu_popover(item);
-            menu_button.set_popover(Some(&popover));
-
-            menu_button.set_tooltip_text(Some(&item.display_name));
-            self.container.append(&menu_button);
-            debug!("Added tray icon: {}", item.display_name);
+        if let Some(ref icon_name) = item.icon_name {
+            image.set_icon_name(Some(icon_name));
+        } else if let Some(ref pixbuf) = item.icon_pixbuf {
+            // set_pixel_size only applies to named icons; a raw pixbuf
+            // would render at its native size (SNI icons are commonly
+            // 32px+) and stretch the square hover footprint. Scale it
+            // down to the same 16px the named icons use.
+            #[allow(deprecated)]
+            let scaled = if pixbuf.width() == 16 && pixbuf.height() == 16 {
+                None
+            } else {
+                pixbuf.scale_simple(16, 16, gtk::gdk_pixbuf::InterpType::Bilinear)
+            };
+            let source = scaled.as_ref().unwrap_or(pixbuf);
+            #[allow(deprecated)]
+            let texture = gtk::gdk::Texture::for_pixbuf(source);
+            // Setting a paintable replaces the icon-name storage.
+            image.set_paintable(Some(&texture));
+        } else {
+            warn!(
+                "No icon available for {}, showing fallback icon",
+                item.display_name
+            );
+            image.set_icon_name(Some("application-x-executable"));
         }
+        menu_button.set_tooltip_text(Some(&item.display_name));
     }
 
     fn create_menu_popover(&self, item: &StatusNotifierItem) -> gtk::PopoverMenu {

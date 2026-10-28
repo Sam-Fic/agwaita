@@ -16,8 +16,9 @@ pub struct AudioIcon {
 
 #[derive(Debug)]
 pub enum AudioIconInput {
-    UpdateVolume(f64), // 0.0-1.0
-    UpdateMuted(bool),
+    /// Volume and mute state in one update: the menu previously sent two
+    /// messages per audio change, each re-running every `#[watch]`.
+    UpdateVolumeState(f64, bool),
 }
 
 #[relm4::component(pub)]
@@ -48,10 +49,8 @@ impl SimpleComponent for AudioIcon {
 
     fn update(&mut self, message: Self::Input, #[allow(unused_variables)] sender: ComponentSender<Self>) {
         match message {
-            AudioIconInput::UpdateVolume(volume) => {
+            AudioIconInput::UpdateVolumeState(volume, muted) => {
                 self.volume = volume.clamp(0.0, 1.5);
-            },
-            AudioIconInput::UpdateMuted(muted) => {
                 self.muted = muted;
             },
         }

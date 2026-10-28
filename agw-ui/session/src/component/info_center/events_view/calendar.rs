@@ -25,7 +25,9 @@ use relm4::{
     gtk,
 };
 use std::{
+    cell::Cell,
     collections::HashSet,
+    rc::Rc,
     str::FromStr,
     sync::Arc,
 };
@@ -50,9 +52,57 @@ pub struct Calendar {
     nav_year_label: gtk::Label,
     /// 日期网格容器
     days_grid: gtk::Grid,
-    /// 重建网格时给日期按钮发送点击事件用
-    sender_for_redraw: ComponentSender<Self>,
+    /// 42 个常驻日期格(7x6):更新时只改属性,不再销毁重建控件
+    day_cells: Vec<DayCell>,
+    /// 选中日已渲染的日程,用于避免无变化时的列表重建
+    rendered_events: Vec<EventData>,
     _day_handler: Option<SignalHandler>,
+}
+
+/// 一个常驻的日期格:按钮 + 日期文字 + 事件小圆点。
+///
+/// 旧实现每次刷新都销毁并重建 42 个 Button/Overlay/Label(外加 42 个点击
+/// 闭包、42 次本地化 tooltip 格式化)。现在控件只创建一次,刷新只改文字、
+/// CSS class 和圆点可见性,日历变更不会再造成整格子重建的卡顿。
+struct DayCell {
+    /// 当前显示的日期(点击时读取,避免每次重建闭包)
+    date: Rc<Cell<NaiveDate>>,
+    button: gtk::Button,
+    label: gtk::Label,
+    dot: gtk::Label,
+}
+
+impl DayCell {
+    fn new() -> Self {
+        let button = gtk::Button::new();
+        button.set_size_request(38, 38);
+        button.add_css_class("flat");
+        button.add_css_class("circular");
+
+        let overlay = gtk::Overlay::new();
+        let label = gtk::Label::new(None);
+        overlay.set_child(Some(&label));
+
+        let dot = gtk::Label::new(None);
+        dot.set_valign(gtk::Align::End);
+        dot.set_margin_bottom(4);
+        dot.set_size_request(4, 4);
+        dot.add_css_class("calendar-event-dot");
+        dot.set_visible(false);
+        overlay.add_overlay(&dot);
+
+        button.set_child(Some(&overlay));
+
+        // Placeholder until the first refresh assigns the real date.
+        let date = NaiveDate::from_ymd_opt(1970, 1, 1).unwrap();
+
+        Self {
+            date: Rc::new(Cell::new(date)),
+            button,
+            label,
+            dot,
+        }
+    }
 }
 
 #[derive(Debug)]
@@ -238,7 +288,8 @@ impl SimpleComponent for Calendar {
             nav_month_label: gtk::Label::default(),
             nav_year_label: gtk::Label::default(),
             days_grid: gtk::Grid::new(),
-            sender_for_redraw: sender.clone(),
+            day_cells: Vec::new(),
+            rendered_events: Vec::new(),
             _day_handler: None,
         };
 
@@ -256,6 +307,11 @@ impl SimpleComponent for Calendar {
         // 星期表头(周日起,与日期网格一致)
         Self::fill_weekday_row(&widgets.weekday_row, model.locale);
 
+        // 42 个日期格只在此处创建一次,后续刷新都是原地更新
+        Self::build_day_cells(&mut model, &sender);
+        model.refresh_marks();
+        model.refresh_days(true);
+
         // Load initial events and mark days
         sender.input(CalendarInput::UpdateEvents(Vec::new()));
 
@@ -265,7 +321,12 @@ impl SimpleComponent for Calendar {
         std::thread::spawn(move || {
             while let Ok(update) = receiver.recv() {
                 if let crate::system_state::messages::SystemStateUpdate::CalendarEvents(events) = update {
-                    sender_clone.input(CalendarInput::UpdateEvents(events));
+                    // send() instead of input(): input() panics when the
+                    // component has been dropped (monitor unplugged), while
+                    // this forwarding thread may still see one more event.
+                    let _ = sender_clone
+                        .input_sender()
+                        .send(CalendarInput::UpdateEvents(events));
                 }
             }
         });
@@ -288,13 +349,21 @@ impl SimpleComponent for Calendar {
     fn update(&mut self, message: Self::Input, #[allow(unused_variables)] sender: ComponentSender<Self>) {
         match message {
             CalendarInput::DaySelected(date) => {
+                let previous = self.selected_naive_date;
                 self.selected_naive_date = Some(date);
                 self.selected_title = Self::relative_title(date, self.locale);
                 let today = Local::now().date_naive();
                 self.is_selected_today = date == today;
 
+                // Only the two affected cells change style.
+                for cell in &self.day_cells {
+                    let cell_date = cell.date.get();
+                    if Some(cell_date) == previous || cell_date == date {
+                        self.style_cell(cell, cell_date, today);
+                    }
+                }
+
                 self.update_selected_day_events();
-                self.redraw_days();
             },
             CalendarInput::NavMonth(delta) => {
                 let (mut year, mut month) = (self.display_year, self.display_month as i32 - 1 + delta);
@@ -308,17 +377,26 @@ impl SimpleComponent for Calendar {
                 self.display_year = year;
                 self.display_month = month as u32 + 1;
                 self.refresh_marks();
-                self.redraw_days();
+                self.refresh_days(true);
             },
             CalendarInput::NavYear(delta) => {
                 self.display_year += delta as i32;
                 self.refresh_marks();
-                self.redraw_days();
+                self.refresh_days(true);
             },
             CalendarInput::UpdateEvents(_events) => {
+                // EDS signals can arrive in bursts; only touch the grid when
+                // the marked-day set actually changed, and only rebuild the
+                // event list when its content changed.
+                let marks = self
+                    .global_service
+                    .calendar_service()
+                    .get_days_with_events(self.display_year, self.display_month);
+                if marks != self.marked_days {
+                    self.marked_days = marks;
+                    self.refresh_day_marks();
+                }
                 self.update_selected_day_events();
-                self.refresh_marks();
-                self.redraw_days();
             },
             CalendarInput::ResetToToday => {
                 let today = Local::now();
@@ -328,9 +406,9 @@ impl SimpleComponent for Calendar {
                 self.selected_naive_date = Some(today.date_naive());
                 self.is_selected_today = true;
 
-                self.update_selected_day_events();
                 self.refresh_marks();
-                self.redraw_days();
+                self.refresh_days(true);
+                self.update_selected_day_events();
             },
             CalendarInput::DayChanged => {
                 let today = Local::now();
@@ -349,9 +427,9 @@ impl SimpleComponent for Calendar {
                     }
                 }
 
-                self.update_selected_day_events();
                 self.refresh_marks();
-                self.redraw_days();
+                self.refresh_days(true);
+                self.update_selected_day_events();
             },
         }
     }
@@ -402,17 +480,30 @@ impl Calendar {
         self.marked_days = self
             .global_service
             .calendar_service()
-            .get_days_with_events(self.display_year, self.display_month)
-            .into_iter()
-            .collect();
+            .get_days_with_events(self.display_year, self.display_month);
     }
 
-    /// 重建日期网格:7 列 x 6 行,38px 圆形单元格
-    fn redraw_days(&self) {
-        while let Some(child) = self.days_grid.first_child() {
-            self.days_grid.remove(&child);
-        }
+    /// 创建 42 个常驻日期格(仅初始化时调用一次)
+    fn build_day_cells(model: &mut Self, sender: &ComponentSender<Self>) {
+        for i in 0..42 {
+            let cell = DayCell::new();
+            let sender = sender.clone();
+            let date = Rc::clone(&cell.date);
+            cell.button.connect_clicked(move |_| {
+                sender.input(CalendarInput::DaySelected(date.get()));
+            });
 
+            let col = (i % 7) as i32;
+            let row = (i / 7) as i32;
+            model.days_grid.attach(&cell.button, col, row, 1, 1);
+            model.day_cells.push(cell);
+        }
+    }
+
+    /// 刷新 42 个日期格的日期文字/状态。
+    ///
+    /// `dates_changed` 为 true 时(换月/跨天)才重新生成本地化 tooltip。
+    fn refresh_days(&self, dates_changed: bool) {
         let Some(first_of_month) = NaiveDate::from_ymd_opt(self.display_year, self.display_month, 1) else {
             return;
         };
@@ -420,61 +511,61 @@ impl Calendar {
         // 网格从周日开始
         let grid_start = first_of_month - chrono::Duration::days(first_of_month.weekday().num_days_from_sunday() as i64);
 
-        for i in 0..42 {
-            let date = grid_start + chrono::Duration::days(i);
-            let day = date.day();
-            let in_month = date.year() == self.display_year && date.month() == self.display_month;
+        for (i, cell) in self.day_cells.iter().enumerate() {
+            let date = grid_start + chrono::Duration::days(i as i64);
+            cell.date.set(date);
 
-            let button = gtk::Button::new();
-            button.set_size_request(38, 38);
-            button.add_css_class("flat");
-            button.add_css_class("circular");
-
-            let overlay = gtk::Overlay::new();
-            let label = gtk::Label::new(Some(&day.to_string()));
-
-            if date == today {
-                label.set_markup(&format!("<b>{}</b>", day));
-                button.inline_css("border: 2px solid @accent_color;");
+            if dates_changed {
+                cell.button.set_tooltip_text(Some(&date.format_localized("%x", self.locale).to_string()));
             }
 
-            if Some(date) == self.selected_naive_date {
-                button.remove_css_class("flat");
-                button.add_css_class("accent");
-                label.set_markup(&format!(
-                    "<b><span foreground=\"#ffffff\">{}</span></b>",
-                    day
-                ));
-            }
-
-            if !in_month {
-                button.set_opacity(0.35);
-            }
-
-            overlay.set_child(Some(&label));
-
-            // 有事件的日期:底部小圆点
-            if in_month && self.marked_days.contains(&day) {
-                let dot = gtk::Label::new(None);
-                dot.set_valign(gtk::Align::End);
-                dot.set_margin_bottom(4);
-                dot.set_size_request(4, 4);
-                dot.inline_css("background: @accent_color; border-radius: 2px; min-width: 4px; min-height: 4px;");
-                overlay.add_overlay(&dot);
-            }
-
-            button.set_child(Some(&overlay));
-            button.set_tooltip_text(Some(&date.format_localized("%x", self.locale).to_string()));
-
-            let sender = self.sender_for_redraw.clone();
-            button.connect_clicked(move |_| {
-                sender.input(CalendarInput::DaySelected(date));
-            });
-
-            let col = (i % 7) as i32;
-            let row = (i / 7) as i32;
-            self.days_grid.attach(&button, col, row, 1, 1);
+            self.style_cell(cell, date, today);
         }
+    }
+
+    /// 只更新"有事件"小圆点的可见性(不碰文字和 tooltip)
+    fn refresh_day_marks(&self) {
+        for cell in &self.day_cells {
+            let date = cell.date.get();
+            let in_month = date.year() == self.display_year && date.month() == self.display_month;
+            cell.dot
+                .set_visible(in_month && self.marked_days.contains(&date.day()));
+        }
+    }
+
+    /// 把一个日期格的文字、选中/今天样式和圆点同步到当前模型状态。
+    fn style_cell(&self, cell: &DayCell, date: NaiveDate, today: NaiveDate) {
+        let day = date.day();
+        let in_month = date.year() == self.display_year && date.month() == self.display_month;
+        let selected = Some(date) == self.selected_naive_date;
+        let is_today = date == today;
+
+        if selected {
+            cell.label
+                .set_markup(&format!("<b><span foreground=\"#ffffff\">{}</span></b>", day));
+        } else if is_today {
+            cell.label.set_markup(&format!("<b>{}</b>", day));
+        } else {
+            cell.label.set_text(&day.to_string());
+        }
+
+        if selected {
+            cell.button.remove_css_class("flat");
+            cell.button.add_css_class("accent");
+        } else {
+            cell.button.add_css_class("flat");
+            cell.button.remove_css_class("accent");
+        }
+
+        if is_today {
+            cell.button.add_css_class("calendar-today");
+        } else {
+            cell.button.remove_css_class("calendar-today");
+        }
+
+        cell.button.set_opacity(if in_month { 1.0 } else { 0.35 });
+        cell.dot
+            .set_visible(in_month && self.marked_days.contains(&day));
     }
 
     fn update_selected_day_events(&mut self) {
@@ -489,22 +580,25 @@ impl Calendar {
     }
 
     fn update_selected_day_events_from_list(&mut self, events: &[CalendarEvent]) {
-        let Some(selected_date) = self.selected_naive_date else {
+        // `get_events_for_date` already filters by the selected date and
+        // sorts all-day events first — no second filter pass needed.
+        let rendered: Vec<EventData> = events.iter().map(Self::convert_event).collect();
+
+        self.has_selected_events = !rendered.is_empty();
+
+        // Factory reconstruction is the expensive part (several widgets per
+        // row + inline CSS parses). Skip it when the list is unchanged,
+        // which is the common case for bursts of calendar signals.
+        if rendered == self.rendered_events {
             return;
-        };
-
-        let matched: Vec<&CalendarEvent> = events
-            .iter()
-            .filter(|event| event.start.date_naive() == selected_date)
-            .collect();
-
-        self.has_selected_events = !matched.is_empty();
+        }
+        self.rendered_events = rendered.clone();
 
         let mut events_guard = self.selected_day_events.guard();
         events_guard.clear();
 
-        for event in matched {
-            events_guard.push_back(Self::convert_event(event));
+        for event in rendered {
+            events_guard.push_back(event);
         }
     }
 

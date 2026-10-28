@@ -155,11 +155,7 @@ impl WidgetImpl for SlideBinImp {
         }
         if progress >= 1.0 {
             // Resting state: draw the child untouched, no transform cost.
-            for child in widget.observe_children().iter::<glib::Object>().flatten() {
-                if let Ok(child) = child.downcast::<gtk4::Widget>() {
-                    widget.snapshot_child(&child, snapshot);
-                }
-            }
+            Self::snapshot_children(&widget, snapshot);
             return;
         }
 
@@ -168,10 +164,19 @@ impl WidgetImpl for SlideBinImp {
         if offset != 0.0 {
             snapshot.translate(&graphene::Point::new(0.0, offset));
         }
-        for child in widget.observe_children().iter::<glib::Object>().flatten() {
-            if let Ok(child) = child.downcast::<gtk4::Widget>() {
-                widget.snapshot_child(&child, snapshot);
-            }
+        Self::snapshot_children(&widget, snapshot);
+    }
+}
+
+impl SlideBinImp {
+    /// Snapshot every child without allocating an intermediate list: this
+    /// runs on every animation frame, so `observe_children()`'s Vec plus
+    /// type checks are avoidable per-frame overhead.
+    fn snapshot_children(widget: &SlideBin, snapshot: &gtk4::Snapshot) {
+        let mut child = widget.first_child();
+        while let Some(current) = child {
+            widget.snapshot_child(&current, snapshot);
+            child = current.next_sibling();
         }
     }
 }

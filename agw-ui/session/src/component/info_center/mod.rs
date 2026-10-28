@@ -106,11 +106,14 @@ impl SimpleComponent for InfoCenter {
         let notifications = Notifications::builder().launch(notification_store).detach();
         let calendar = Calendar::builder().launch(global_service.clone()).detach();
 
-        // Subscribe to time changes (second precision)
+        // Subscribe to time changes. The label shows minute precision, so a
+        // per-second subscription would re-render the clock 59 times per
+        // minute with no visible change — minute granularity both formats
+        // and wakes exactly when the displayed value flips.
         let time_sender = sender.input_sender().clone();
         let time_handler = global_service
             .time_service()
-            .subscribe(TimeUnit::Second, move |_| {
+            .subscribe(TimeUnit::Minute, move |_| {
                 // Use send() instead of input() to avoid panic when component is dropped
                 let _ = time_sender.send(InfoCenterInput::UpdateTime);
             });
@@ -149,20 +152,25 @@ impl SimpleComponent for InfoCenter {
 }
 
 impl InfoCenter {
+    /// Parse the environment locale once — `Locale::from_str` is far too
+    /// expensive to redo on every clock tick.
     fn get_system_locale() -> Locale {
-        std::env::var("LANG")
-            .or_else(|_| std::env::var("LC_TIME"))
-            .or_else(|_| std::env::var("LC_ALL"))
-            .ok()
-            .and_then(|lang| {
-                let locale_str = lang.split('.').next().unwrap_or("en_US");
+        static LOCALE: std::sync::OnceLock<Locale> = std::sync::OnceLock::new();
+        *LOCALE.get_or_init(|| {
+            std::env::var("LANG")
+                .or_else(|_| std::env::var("LC_TIME"))
+                .or_else(|_| std::env::var("LC_ALL"))
+                .ok()
+                .and_then(|lang| {
+                    let locale_str = lang.split('.').next().unwrap_or("en_US");
 
-                match Locale::from_str(locale_str) {
-                    Ok(locale) => Some(locale),
-                    Err(_) => Some(Locale::default()),
-                }
-            })
-            .unwrap_or(Locale::en_US)
+                    match Locale::from_str(locale_str) {
+                        Ok(locale) => Some(locale),
+                        Err(_) => Some(Locale::default()),
+                    }
+                })
+                .unwrap_or(Locale::en_US)
+        })
     }
 
     fn format_time() -> String {

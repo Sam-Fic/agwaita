@@ -10,7 +10,7 @@ use relm4::{
     gtk,
 };
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct EventData {
     pub title: String,
     pub description: Option<String>,
@@ -86,7 +86,7 @@ impl FactoryComponent for EventItem {
                     },
                     gtk::Label {
                         add_css_class: "caption",
-                        set_visible: !self.event.description.clone().unwrap_or_default().is_empty(),
+                        set_visible: !self.event.description.as_deref().is_none_or(str::is_empty),
                         set_halign: gtk::Align::Start,
                         set_hexpand: true,
                         set_wrap: true,

@@ -68,9 +68,17 @@ impl SimpleComponent for SystemdUnitFailedIndicator {
         let input_sender = sender.input_sender().clone();
         std::thread::spawn(move || {
             while let Ok(update) = system_state_receiver.recv() {
-                input_sender
-                    .send(SystemdUnitFailedIndicatorInput::SystemStateUpdate(update))
-                    .ok();
+                // Only systemd updates concern this component: forwarding
+                // every broadcast re-ran all `#[watch]` (tooltip markup
+                // rebuild included) on unrelated battery/audio/network
+                // changes.
+                if let SystemStateUpdate::SystemdFailed(units) = update {
+                    input_sender
+                        .send(SystemdUnitFailedIndicatorInput::SystemStateUpdate(
+                            SystemStateUpdate::SystemdFailed(units),
+                        ))
+                        .ok();
+                }
             }
         });
 
@@ -85,17 +93,21 @@ impl SimpleComponent for SystemdUnitFailedIndicator {
             },
             SystemdUnitFailedIndicatorInput::ResetFailed => {
                 debug!("Resetting failed systemd units");
-                match Command::new("systemctl")
-                    .args(&["--user", "reset-failed"])
-                    .output()
-                {
-                    Ok(_) => {
-                        debug!("Successfully reset failed units");
-                    },
-                    Err(e) => {
-                        warn!("Failed to reset systemd units: {}", e);
-                    },
-                }
+                // systemctl runs on a worker thread: a process spawn on the
+                // GTK main thread would stall event delivery and animations.
+                std::thread::spawn(|| {
+                    match Command::new("systemctl")
+                        .args(["--user", "reset-failed"])
+                        .output()
+                    {
+                        Ok(_) => {
+                            debug!("Successfully reset failed units");
+                        },
+                        Err(e) => {
+                            warn!("Failed to reset systemd units: {}", e);
+                        },
+                    }
+                });
             },
             _ => {},
         }

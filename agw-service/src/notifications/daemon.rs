@@ -348,17 +348,29 @@ impl DBusDaemon {
         );
         self.inner.notified.emit_sync((id, replaced));
 
-        // Schedule expiration if needed
+        // Schedule expiration if needed. A tokio timer replaces the old
+        // one-thread-per-notification sleep, which created an OS thread for
+        // every notification with a timeout.
         let ignore_timeout = *self.inner.ignore_timeout.read().unwrap();
         if !ignore_timeout && timeout > 0 {
             let inner_clone = Arc::clone(&self.inner);
             let timeout_ms = timeout as u64;
-            thread::spawn(move || {
-                thread::sleep(Duration::from_millis(timeout_ms));
-                if !*inner_clone.ignore_timeout.read().unwrap() {
-                    inner_clone.resolve(id, ClosedReason::Expired);
-                }
-            });
+            if let Ok(handle) = Handle::try_current() {
+                handle.spawn(async move {
+                    tokio::time::sleep(Duration::from_millis(timeout_ms)).await;
+                    if !*inner_clone.ignore_timeout.read().unwrap() {
+                        inner_clone.resolve(id, ClosedReason::Expired);
+                    }
+                });
+            } else {
+                // No reactor in this context: fall back to a thread.
+                thread::spawn(move || {
+                    thread::sleep(Duration::from_millis(timeout_ms));
+                    if !*inner_clone.ignore_timeout.read().unwrap() {
+                        inner_clone.resolve(id, ClosedReason::Expired);
+                    }
+                });
+            }
         }
 
         Ok(id)

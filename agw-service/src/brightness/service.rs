@@ -28,6 +28,7 @@ use std::{
     sync::{
         Arc,
         Mutex,
+        mpsc::Sender,
     },
     thread,
     time::Instant,
@@ -64,6 +65,9 @@ pub struct BrightnessService {
     /// D-Bus connection for logind (Arc for clonability)
     conn: Option<Arc<Connection>>,
 
+    /// Sender to the single brightness writer thread
+    writer_tx: Option<Sender<u32>>,
+
     /// Timestamp of last set_brightness call (for debouncing inotify)
     last_set_time: Arc<Mutex<Option<Instant>>>,
 }
@@ -80,14 +84,73 @@ impl BrightnessService {
             },
         };
 
+        let writer_tx = conn
+            .as_ref()
+            .zip(device_path.as_ref())
+            .map(|(conn, device_path)| {
+                let conn = Arc::clone(conn);
+                let device_name = device_path
+                    .file_name()
+                    .and_then(|n| n.to_str())
+                    .unwrap_or("")
+                    .to_string();
+                Self::start_writer_thread(conn, device_name)
+            });
+
         Self {
             device_path,
             max_brightness,
             current_brightness: Arc::new(Mutex::new(current_brightness)),
             brightness_changed: Signal::new(),
             conn,
+            writer_tx,
             last_set_time: Arc::new(Mutex::new(None)),
         }
+    }
+
+    /// Spawn the single long-lived writer thread for logind calls.
+    ///
+    /// Dragging the slider used to spawn one thread (and one D-Bus proxy)
+    /// per percentage step with no ordering guarantees, so tens of
+    /// concurrent writes could race and make the backlight jump back and
+    /// forth. This worker drains its queue and only forwards the newest
+    /// value, reusing one proxy — a fast drag becomes one D-Bus call with
+    /// the final value.
+    fn start_writer_thread(conn: Arc<Connection>, device_name: String) -> Sender<u32> {
+        let (tx, rx) = std::sync::mpsc::channel::<u32>();
+        thread::spawn(move || {
+            // The proxy is created lazily and re-created on failure, so a
+            // transient D-Bus problem at startup no longer permanently
+            // disables brightness control.
+            let mut proxy = BrightnessCtrlProxyBlocking::new(conn.as_ref()).ok();
+
+            while let Ok(first_value) = rx.recv() {
+                // Coalesce everything already queued, keeping only the
+                // latest value.
+                let mut value = first_value;
+                while let Ok(newer) = rx.try_recv() {
+                    value = newer;
+                }
+
+                if proxy.is_none() {
+                    proxy = BrightnessCtrlProxyBlocking::new(conn.as_ref()).ok();
+                }
+
+                match proxy.as_ref() {
+                    Some(writer) => {
+                        if let Err(e) = writer.set_brightness("backlight", &device_name, value) {
+                            error!("Failed to set brightness via logind: {}", e);
+                            // Reconnect on the next request.
+                            proxy = None;
+                        }
+                    },
+                    None => {
+                        error!("Failed to create brightness proxy");
+                    },
+                }
+            }
+        });
+        tx
     }
 
     /// Initialize brightness device from sysfs
@@ -139,28 +202,10 @@ impl BrightnessService {
 
         *self.last_set_time.lock().unwrap() = Some(Instant::now());
 
-        if let (Some(conn), Some(device_path)) = (&self.conn, &self.device_path) {
-            let device_name = device_path
-                .file_name()
-                .and_then(|n| n.to_str())
-                .unwrap_or("");
-
-            let conn_clone = Arc::clone(conn);
-            let device_name = device_name.to_string();
-            let raw_value_clone = raw_value;
-
-            thread::spawn(
-                move || match BrightnessCtrlProxyBlocking::new(conn_clone.as_ref()) {
-                    Ok(proxy) => {
-                        if let Err(e) = proxy.set_brightness("backlight", &device_name, raw_value_clone) {
-                            error!("Failed to set brightness via logind: {}", e);
-                        }
-                    },
-                    Err(e) => {
-                        error!("Failed to create brightness proxy: {}", e);
-                    },
-                },
-            );
+        if let Some(tx) = &self.writer_tx {
+            // The writer thread coalesles bursts, so a slider drag results
+            // in exactly one logind call with the final value.
+            let _ = tx.send(raw_value);
         } else {
             warn!("D-Bus connection or device path not available for brightness control");
         }
@@ -220,6 +265,7 @@ impl Clone for BrightnessService {
             current_brightness: Arc::clone(&self.current_brightness),
             brightness_changed: self.brightness_changed.clone(),
             conn: self.conn.as_ref().map(Arc::clone),
+            writer_tx: self.writer_tx.clone(),
             last_set_time: Arc::clone(&self.last_set_time),
         }
     }

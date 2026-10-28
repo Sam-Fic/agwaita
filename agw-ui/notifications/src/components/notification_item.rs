@@ -16,8 +16,48 @@ use std::sync::{
     OnceLock,
 };
 
+/// Registers the notification card rules once per process. Urgency styling
+/// and the popup background used to be applied through `inline_css`, which
+/// allocates and attaches a brand-new CssProvider on every call — and
+/// `bind()` runs each time a recycled row is rebound, so providers piled up
+/// on the same widget for the lifetime of the shell. CSS classes are
+/// idempotent and cost nothing to toggle.
+fn ensure_notification_style() {
+    static STYLE: OnceLock<()> = OnceLock::new();
+    STYLE.get_or_init(|| {
+        let provider = gtk::CssProvider::new();
+        provider.load_from_string(
+            "box.notification-card.notification-critical { border: 1px solid var(--error-color); }\n\
+             box.notification-card.notification-popup { background: var(--popover-bg-color); }",
+        );
+        if let Some(display) = gtk::gdk::Display::default() {
+            gtk::style_context_add_provider_for_display(
+                &display,
+                &provider,
+                gtk::STYLE_PROVIDER_PRIORITY_APPLICATION + 1,
+            );
+        }
+    });
+}
+
+/// Apply urgency/popup styling through stable CSS classes.
+fn apply_notification_style(widget: &gtk::Box, notification: &Notification, is_popup: bool) {
+    widget.add_css_class("notification-card");
+    if notification.urgency == crate::model::NotificationUrgency::Critical {
+        widget.add_css_class("notification-critical");
+    } else {
+        widget.remove_css_class("notification-critical");
+    }
+    if is_popup {
+        widget.add_css_class("notification-popup");
+    } else {
+        widget.remove_css_class("notification-popup");
+    }
+}
+
 /// Creates a standalone notification widget (not for ListView)
 pub fn create_notification_widget(notification: &Notification, store: &Arc<NotificationStore>, is_popup: bool) -> gtk::Box {
+    ensure_notification_style();
     relm4::view! {
         root_box = gtk::Box {
             add_css_class: "card",
@@ -143,15 +183,8 @@ pub fn create_notification_widget(notification: &Notification, store: &Arc<Notif
         }
     }
 
-    // Apply styling based on context
-    if is_popup {
-        root_box.inline_css(&format!(
-            "{}background: var(--popover-bg-color);",
-            notification.urgency_css_class()
-        ));
-    } else {
-        root_box.inline_css(notification.urgency_css_class());
-    }
+    // Apply styling based on context (CSS classes, not per-widget providers)
+    apply_notification_style(&root_box, notification, is_popup);
 
     // App icon
     if let Some(ref icon) = notification.app_icon {
@@ -271,6 +304,10 @@ pub struct NotificationItemWidget {
     actions_box: gtk::Box,
     actions_scroll: gtk::ScrolledWindow,
     store: Option<Arc<NotificationStore>>,
+    /// Identity of the notification currently bound to this (recycled) row.
+    /// The close handler reads it at click time instead of capturing the id
+    /// of whichever notification first bound to the row.
+    current_id: std::rc::Rc<std::cell::Cell<u32>>,
 }
 
 impl Drop for NotificationItemWidget {
@@ -284,6 +321,10 @@ impl RelmListItem for NotificationWithContext {
     type Widgets = NotificationItemWidget;
 
     fn setup(list_item: &gtk::ListItem) -> (gtk::Box, NotificationItemWidget) {
+        // The popup's ListView path never goes through
+        // `create_notification_widget`, so register the card rules here as
+        // well (idempotent).
+        ensure_notification_style();
         list_item.set_activatable(false);
         list_item.set_selectable(false);
         list_item.set_focusable(false);
@@ -421,35 +462,33 @@ impl RelmListItem for NotificationWithContext {
             actions_box,
             actions_scroll,
             store: None,
+            current_id: std::rc::Rc::new(std::cell::Cell::new(0)),
         };
 
         (root_box, widget)
     }
 
     fn bind(&mut self, widgets: &mut Self::Widgets, root: &mut Self::Root) {
-        // Store the store reference if not already done
+        // The row is recycled by the ListView: remember which notification
+        // is bound right now so the close button (connected once) always
+        // closes the visible one.
+        widgets.current_id.set(self.notification.id);
+
+        // Store the store reference and connect the close button once
         if widgets.store.is_none() {
             if let Some(store) = NOTIFICATION_STORE.get() {
                 widgets.store = Some(store.clone());
 
-                // Connect close button
                 let store_clone = store.clone();
-                let notification_id = self.notification.id;
+                let notification_id = std::rc::Rc::clone(&widgets.current_id);
                 widgets.close_button.connect_clicked(move |_| {
-                    store_clone.close(notification_id);
+                    store_clone.close(notification_id.get());
                 });
             }
         }
 
-        // Apply styling based on context
-        if self.is_popup {
-            root.inline_css(&format!(
-                "{}background: var(--popover-bg-color);",
-                self.notification.urgency_css_class()
-            ));
-        } else {
-            root.inline_css(self.notification.urgency_css_class());
-        }
+        // Apply styling based on context (CSS classes, not per-widget providers)
+        apply_notification_style(root, &self.notification, self.is_popup);
 
         // App icon
         if let Some(ref icon) = self.notification.app_icon {

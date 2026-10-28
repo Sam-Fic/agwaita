@@ -12,7 +12,7 @@ use zbus::{
 };
 
 /// DBusMenu layout tree structure (id, properties, children).
-#[derive(Clone, Debug, Type)]
+#[derive(Clone, Debug, PartialEq, Type)]
 #[zvariant(signature = "(ia{sv}av)")]
 pub struct Layout(pub i32, pub LayoutProps, pub Vec<Layout>);
 
@@ -24,7 +24,7 @@ impl<'a> serde::Deserialize<'a> for Layout {
 }
 
 /// Properties for DBusMenu layout items.
-#[derive(Clone, Debug, Type, zbus::zvariant::DeserializeDict)]
+#[derive(Clone, Debug, PartialEq, Type, zbus::zvariant::DeserializeDict)]
 #[zvariant(signature = "dict")]
 pub struct LayoutProps {
     // #[zvariant(rename = "children-display")]

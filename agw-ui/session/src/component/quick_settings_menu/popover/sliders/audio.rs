@@ -130,11 +130,13 @@ impl Component for AudioSlider {
                 // Update from system
                 debug!("UpdateVolume from system: {:.2}", volume);
                 self.volume = volume;
-                self.audio_icon.emit(AudioIconInput::UpdateVolume(volume));
+                self.audio_icon
+                    .emit(AudioIconInput::UpdateVolumeState(volume, self.muted));
             },
             AudioSliderInput::UpdateMuted(muted) => {
                 self.muted = muted;
-                self.audio_icon.emit(AudioIconInput::UpdateMuted(muted));
+                self.audio_icon
+                    .emit(AudioIconInput::UpdateVolumeState(self.volume, muted));
             },
             AudioSliderInput::VolumeChanged(volume) => {
                 // Only update if the percentage value changed (avoid spam)
@@ -142,7 +144,8 @@ impl Component for AudioSlider {
                 let new_percent = (volume * 100.0) as i32;
 
                 self.volume = volume;
-                self.audio_icon.emit(AudioIconInput::UpdateVolume(volume));
+                self.audio_icon
+                    .emit(AudioIconInput::UpdateVolumeState(volume, self.muted));
 
                 if old_percent != new_percent {
                     self.audio_service.set_volume(volume);

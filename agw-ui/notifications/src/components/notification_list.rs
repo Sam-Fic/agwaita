@@ -283,27 +283,18 @@ impl NotificationList {
     }
 
     fn schedule_popup_hide(&self, notification: Notification) {
-        if let Some(duration) = notification.get_timeout_duration() {
-            let store = self.config.store.clone();
-            let id = notification.id;
+        // GLib timers instead of a sleeping thread per notification: the
+        // old version spawned one OS thread for every popup just to wait
+        // out its timeout.
+        let duration = notification
+            .get_timeout_duration()
+            .unwrap_or(std::time::Duration::from_secs(5));
+        let store = self.config.store.clone();
+        let id = notification.id;
 
-            std::thread::spawn(move || {
-                std::thread::sleep(duration);
-                debug!("Popup timeout expired for notification {}, hiding", id);
-                store.hide(id);
-            });
-        } else if self.config.enable_popup_timeout {
-            let store = self.config.store.clone();
-            let id = notification.id;
-
-            std::thread::spawn(move || {
-                std::thread::sleep(std::time::Duration::from_secs(5));
-                debug!(
-                    "Default popup timeout (5s) expired for notification {}, hiding",
-                    id
-                );
-                store.hide(id);
-            });
-        }
+        glib::timeout_add_local_once(duration, move || {
+            debug!("Popup timeout expired for notification {}, hiding", id);
+            store.hide(id);
+        });
     }
 }

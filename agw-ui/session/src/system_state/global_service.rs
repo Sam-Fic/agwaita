@@ -446,21 +446,10 @@ impl GlobalSystemService {
         let subscribers = self.subscribers.clone();
         let service = self.network_service.clone();
 
-        // Get and broadcast initial state
-        let initial_state = service.get_state();
-        debug!(
-            "Initial network: type={:?}, connected={}, strength={}%",
-            initial_state.network_type, initial_state.connected, initial_state.wifi_strength
-        );
-
-        let update = SystemStateUpdate::Network(
-            initial_state.network_type,
-            initial_state.connected,
-            initial_state.wifi_strength,
-        );
-        let mut subs = subscribers.lock().unwrap();
-        subs.retain(|sender| sender.send(update.clone()).is_ok());
-        drop(subs);
+        // The initial state refresh and broadcast now happen on the
+        // monitor's background thread (see NetworkService::start_hybrid_monitor),
+        // so the GTK main thread no longer blocks on interface probing
+        // during startup — and no longer reads a stale pre-probe state here.
 
         // Start hybrid monitor: D-Bus events + conditional WiFi polling
         service.start_hybrid_monitor(move |network_type, connected, wifi_strength| {
