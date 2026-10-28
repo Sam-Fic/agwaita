@@ -47,6 +47,17 @@ struct TimeSignals {
 }
 
 impl TimeSignals {
+    /// True when at least one granularity is being observed.
+    fn has_listeners(&self) -> bool {
+        self.second_changed.handler_count() > 0
+            || self.minute_changed.handler_count() > 0
+            || self.hour_changed.handler_count() > 0
+            || self.day_changed.handler_count() > 0
+            || self.week_changed.handler_count() > 0
+            || self.month_changed.handler_count() > 0
+            || self.year_changed.handler_count() > 0
+    }
+
     fn new() -> Self {
         Self {
             second_changed: Signal::new(),
@@ -76,6 +87,11 @@ pub struct TimeService {
     started: AtomicBool,
     signals: TimeSignals,
     state: Arc<Mutex<TimeState>>,
+    /// Wakes the scheduler when a new subscription changes the required
+    /// tick granularity (e.g. the clock subscribing after startup). Without
+    /// it the loop could sleep on a coarse boundary chosen when nobody was
+    /// listening — which is exactly one day, so the clock never updated.
+    wake: Arc<tokio::sync::Notify>,
 }
 
 impl TimeService {
@@ -85,6 +101,7 @@ impl TimeService {
         Self {
             started: AtomicBool::new(false),
             signals: TimeSignals::new(),
+            wake: Arc::new(tokio::sync::Notify::new()),
             state: Arc::new(Mutex::new(TimeState {
                 second: now.second(),
                 minute: now.minute(),
@@ -106,9 +123,17 @@ impl TimeService {
 
         let signals = self.signals.clone();
         let state = Arc::clone(&self.state);
+        let wake = Arc::clone(&self.wake);
 
         runtime::spawn(async move {
             loop {
+                // Nothing observed: park until a subscriber arrives instead
+                // of waking for nothing.
+                if !signals.has_listeners() {
+                    wake.notified().await;
+                    continue;
+                }
+
                 // Sleep only until the next boundary of the finest
                 // granularity anyone actually subscribes to. The old fixed
                 // 100ms tick woke the process ten times per second around
@@ -119,10 +144,15 @@ impl TimeService {
                 let target_ts = next_boundary(&signals, &now);
                 let remaining_ns = (target_ts - now.timestamp()).max(1) * 1_000_000_000
                     - i64::from(now.timestamp_subsec_nanos());
-                tokio::time::sleep(std::time::Duration::from_nanos(
-                    remaining_ns.max(1_000_000) as u64,
-                ))
-                .await;
+                tokio::select! {
+                    _ = tokio::time::sleep(std::time::Duration::from_nanos(
+                        remaining_ns.max(1_000_000) as u64,
+                    )) => {},
+                    // A subscription changed the needed granularity:
+                    // recompute the target instead of sleeping on the old
+                    // (possibly day-long) boundary.
+                    _ = wake.notified() => continue,
+                }
 
                 let now = Local::now();
                 let iso_week = now.iso_week();
@@ -204,7 +234,7 @@ impl TimeService {
     where
         F: Fn(DateTime<Local>) + Send + 'static,
     {
-        match unit {
+        let handler = match unit {
             TimeUnit::Second => self.signals.second_changed.connect(callback),
             TimeUnit::Minute => self.signals.minute_changed.connect(callback),
             TimeUnit::Hour => self.signals.hour_changed.connect(callback),
@@ -212,7 +242,11 @@ impl TimeService {
             TimeUnit::Week => self.signals.week_changed.connect(callback),
             TimeUnit::Month => self.signals.month_changed.connect(callback),
             TimeUnit::Year => self.signals.year_changed.connect(callback),
-        }
+        };
+
+        // Let the scheduler pick a finer wake-up boundary immediately.
+        self.wake.notify_one();
+        handler
     }
 }
 
@@ -279,6 +313,40 @@ mod tests {
         assert_eq!(
             next_boundary(&service.signals, &now),
             now.timestamp() + 1
+        );
+    }
+
+    #[test]
+    fn subscriber_after_start_ticks_without_waiting_for_midnight() {
+        // Regression: the scheduler used to compute its wake-up target once
+        // at startup, when no listeners existed yet — that target is local
+        // midnight, so a clock subscribing a moment later was not refreshed
+        // for the rest of the day. A second-granularity subscription must
+        // now interrupt that sleep and tick within a couple of seconds.
+        use std::sync::{
+            Arc,
+            atomic::{
+                AtomicBool,
+                Ordering as AtomicOrdering,
+            },
+        };
+
+        let service = TimeService::new();
+        service.start();
+
+        let fired = Arc::new(AtomicBool::new(false));
+        let flag = Arc::clone(&fired);
+        let _handler = service.subscribe(TimeUnit::Second, move |_| {
+            flag.store(true, AtomicOrdering::SeqCst);
+        });
+
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(3);
+        while !fired.load(AtomicOrdering::SeqCst) && std::time::Instant::now() < deadline {
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+        assert!(
+            fired.load(AtomicOrdering::SeqCst),
+            "a second subscriber registered after start() must tick within 3s"
         );
     }
 
